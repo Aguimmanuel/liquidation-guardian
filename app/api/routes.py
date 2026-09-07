@@ -70,6 +70,11 @@ class ReturnFundsIn(BaseModel):
     symbol: Optional[str] = None
 
 
+class FundsTransferIn(BaseModel):
+    direction: str = "to_futures"   # "to_futures" | "to_spot"
+    amount_usdt: Optional[float] = None  # None/blank = move the whole source balance
+
+
 def build_router(orch: Orchestrator) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -125,6 +130,13 @@ def build_router(orch: Orchestrator) -> APIRouter:
             resp = await orch.release_margin_to_spot(body.symbol)
         else:
             resp = await orch.return_futures_wallet_to_spot()
+        return resp.to_dict()
+
+    @router.post("/funds/transfer")
+    async def funds_transfer(body: FundsTransferIn) -> dict[str, Any]:
+        """Move free balance between spot and the futures wallet (either way).
+        Free balance only — never the margin of an open position."""
+        resp = await orch.transfer_balance(body.direction, body.amount_usdt)
         return resp.to_dict()
 
     # -------------------------------------------------------------- market

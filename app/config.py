@@ -21,9 +21,7 @@ EDITABLE_RAIL_KEYS: tuple[str, ...] = (
     "liq_warn_pct",
     "liq_danger_pct",
     "liq_target_dist_pct",
-    "max_trade_pct",
     "min_trade_value_usdt",
-    "cooldown_seconds",
     "max_leverage",
 )
 
@@ -33,9 +31,7 @@ RAIL_BOUNDS: dict[str, tuple[float, float]] = {
     "liq_warn_pct": (0.0, 1.0),
     "liq_danger_pct": (0.0, 1.0),
     "liq_target_dist_pct": (0.0, 1.0),
-    "max_trade_pct": (0.0, 1.0),
     "min_trade_value_usdt": (0.0, float("inf")),
-    "cooldown_seconds": (0.0, float("inf")),
     "max_leverage": (1.0, 125.0),  # Binance USDⓈ-M hard max
 }
 
@@ -48,12 +44,11 @@ RAIL_BOUNDS: dict[str, tuple[float, float]] = {
 
 @dataclass
 class GuardrailConfig:
-    max_trade_pct: float = 0.10  # one order may not exceed 10% of portfolio value
-    max_drawdown_pct: float = 0.15  # portfolio drawdown from peak halts new buys
+    # The two remaining runtime knobs both gate flows the app actually runs:
+    # min_trade_value_usdt floors dust-sized actions and max_leverage caps the
+    # leverage used when opening a position (and bounds margin release).
     min_trade_value_usdt: float = 10.0  # ignore dust-sized orders
-    cooldown_seconds: int = 3600  # minimum gap between autonomous actions
-    drift_threshold_pct: float = 0.05  # unused by the guardian (kept for config parity)
-    target_cash_pct: float = 0.10  # default cash reserve target
+    max_leverage: float = 50.0  # cap when opening a position (UI enforces <= this)
     # -- liquidation protection (futures) --
     liq_warn_pct: float = 0.10  # distance to liq below this = WATCH
     liq_danger_pct: float = (
@@ -71,18 +66,12 @@ class GuardrailConfig:
     )  # empty list = allow any symbol from market feed
     fee_rate: float = 0.001  # simulated taker fee (0.1%), Binance spot
     # -- runtime-editable guardrail state (set from the UI) --
-    max_leverage: float = 50.0  # cap when opening a position (UI enforces <= this)
     mcp_url: str = "https://agent.binance.com/mcp/agentic"
     mcp_access_token: str = ""  # optional pre-issued Bearer token
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "max_trade_pct": self.max_trade_pct,
-            "max_drawdown_pct": self.max_drawdown_pct,
             "min_trade_value_usdt": self.min_trade_value_usdt,
-            "cooldown_seconds": self.cooldown_seconds,
-            "drift_threshold_pct": self.drift_threshold_pct,
-            "target_cash_pct": self.target_cash_pct,
             "symbol_allowlist": self.symbol_allowlist,
             "fee_rate": self.fee_rate,
             "liq_warn_pct": self.liq_warn_pct,
@@ -193,12 +182,7 @@ def load_config() -> AppConfig:
 def load_guardrails() -> GuardrailConfig:
     """Build the guardrail config from environment (independent of app config)."""
     return GuardrailConfig(
-        max_trade_pct=_env_float("RS_MAX_TRADE_PCT", 0.10),
-        max_drawdown_pct=_env_float("RS_MAX_DRAWDOWN_PCT", 0.15),
         min_trade_value_usdt=_env_float("RS_MIN_TRADE_VALUE_USDT", 10.0),
-        cooldown_seconds=_env_int("RS_COOLDOWN_SECONDS", 3600),
-        drift_threshold_pct=_env_float("RS_DRIFT_THRESHOLD_PCT", 0.05),
-        target_cash_pct=_env_float("RS_TARGET_CASH_PCT", 0.10),
         symbol_allowlist=_env_list(
             "RS_SYMBOL_ALLOWLIST", ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
         ),

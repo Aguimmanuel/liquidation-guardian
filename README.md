@@ -17,9 +17,10 @@ positions from liquidation risk.
   OK / WATCH / DANGER based on its distance to liquidation.
 - **Explains the safest next step.** When a position gets dangerous, the agent
   proposes the two standard protection paths: reduce exposure or add margin.
-- **Applies guardrails before action.** Every action is checked against size,
-  wallet, leverage, cooldown, drawdown, symbol-allowlist, and cash rules — with
-  no per-day trade cap, so protection can never be frozen by a calendar limit.
+- **Applies guardrails before action.** Every action is checked against symbol
+  allowlist, dust minimums, leverage and cash rules — and protection is never
+  frozen by a calendar window, an order-size cap or a cooldown (removed on
+  purpose: they could block a de-risk mid-crash).
 - **An always-on guardian.** It watches every open position around the clock
   in *both* modes, logs risk-zone changes (OK → WATCH → DANGER) as they
   happen, and escalates the moment one reaches the danger zone: in manual
@@ -30,18 +31,24 @@ positions from liquidation risk.
 - **Adds contextual analysis when useful.** A per-coin market read can help the
   operator understand trend, support/resistance, and whether risk should be
   reduced or preserved.
-- **An editable, persistent risk profile — with no per-day trade cap.** Every
-  limit (danger/warn zones, de-risk target, order size, leverage cap,
-  cooldown) is editable in the UI, sanity-bounded, and survives restarts.
-  There is deliberately no "trades per day" budget: the guardian only
-  *protects*, so its actions are never frozen by a calendar window — a
-  position in danger is handled whenever it appears.
-- **Money can always come home.** Spot → futures is never a one-way door.
-  Closing a position parks its margin and PnL in the futures wallet; a bar
-  under the positions table moves that free balance back to spot. And a
-  per-position `↩` releases margin you no longer need off an open position —
-  bounded so the position keeps its de-risk headroom and its effective
-  leverage never exceeds the cap.
+- **An editable, persistent risk profile — nothing decorative.** Every knob
+  (danger/warn zones, de-risk target, leverage cap, min action value) genuinely
+  gates what the guardian does, is sanity-bounded, and survives restarts. No
+  per-day trade budget, order-size cap or cooldown: the guardian only
+  *protects*, so its actions are never frozen — a position in danger is
+  handled whenever it appears.
+- **Money flows both ways — nothing is trapped.** Under the positions table, a
+  funds control moves free balance between **spot** and the **futures wallet**
+  in either direction, by amount. A per-position `↩` releases excess margin
+  off an open position (bounded so it keeps its de-risk headroom and its
+  effective leverage never exceeds the cap). Only free balance moves — no
+  open position's margin is ever touched by the to/from control.
+- **The console is a real command line, not a chat toy.** Beyond “risk
+  report” / “status”, plain language drives the app: “open long BTC 500 at
+  10x”, “close BTC”, “close all my positions”, “add 200 margin to BTC”,
+  “release margin on BTC”, “move 500 to futures”, “set danger zone to 5%”,
+  “auto mode”. Everything still runs through the same guardrailed
+  propose-and-approve pipeline.
 
 This scope is deliberate. The project is not trying to be a broad autonomous
 trading system; it is an AI risk agent for futures protection and staged
@@ -52,7 +59,7 @@ execution planning.
 A liquidation price is easy to compute; the hard part is what happens when you
 get close to it. In a fast market, panic takes over — people average into a
 losing position, add margin at the worst moment, or freeze. The guardian does
-the math calmly and hands you a concrete, size-capped plan with the numbers.
+the math calmly and hands you a concrete, guardrailed plan with the numbers.
 The agent is a risk manager, not a gambler.
 
 ## Quickstart
@@ -125,7 +132,7 @@ with a small amount in the sub-account and work up.
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 58 unit tests, no network needed
+python -m pytest tests/ -q            # 69 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```
@@ -160,8 +167,7 @@ main knobs:
 | `RS_LIQ_WARN_PCT` | `0.10` | distance to liq below this = WATCH |
 | `RS_LIQ_DANGER_PCT` | `0.06` | distance to liq below this = DANGER → de-risk proposed |
 | `RS_LIQ_TARGET_DIST_PCT` | `0.15` | de-risk until 15% headroom |
-| `RS_MAX_TRADE_PCT` | `0.10` | max order size as share of portfolio (buys/margin) |
-| `RS_MIN_TRADE_VALUE_USDT` | `10.0` | ignore dust-size orders |
+| `RS_MIN_TRADE_VALUE_USDT` | `10.0` | ignore dust-size orders (UI-editable) |
 | `RS_MAX_LEVERAGE` | `50` | leverage cap when opening trades (UI-editable) |
 | `RS_TICKER_TTL` | `1` | live-ticker refresh interval in seconds |
 | `RS_SYMBOL_ALLOWLIST` | BTC,ETH,BNB,SOL | empty = allow any symbol |

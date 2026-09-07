@@ -402,16 +402,16 @@ def test_guardrail_edits_reject_out_of_bounds(stack):
 def test_profile_values_persist_across_restart(stack, tmp_path):
     """Edits survive a restart (env defaults no longer win)."""
     orch, market, sim = stack
-    orch.update_guardrails({"liq_danger_pct": 0.05, "max_leverage": 25.0, "cooldown_seconds": 1800.0})
+    orch.update_guardrails({"liq_danger_pct": 0.05, "max_leverage": 25.0, "min_trade_value_usdt": 25.0})
 
     from app.agent.orchestrator import Orchestrator
     from app.config import GuardrailConfig
 
-    g2 = GuardrailConfig()  # fresh env defaults (liq_danger 0.06, lev 50, cooldown 3600)
+    g2 = GuardrailConfig()  # fresh env defaults (liq_danger 0.06, lev 50, min 10)
     orch2 = Orchestrator(orch.config, g2, sim, market)
     assert g2.liq_danger_pct == pytest.approx(0.05)
     assert g2.max_leverage == pytest.approx(25.0)
-    assert g2.cooldown_seconds == pytest.approx(1800.0)
+    assert g2.min_trade_value_usdt == pytest.approx(25.0)
 
 
 def _open_danger_long(orch):
@@ -529,3 +529,153 @@ def test_monitor_visibility_watch_logged_ok_silent(stack):
     assert any("ETHUSDT" not in d and "BTCUSDT" in d and "WATCH" in d for d in zone_events)
     assert not any("ETHUSDT" in d for d in zone_events), "calm OK positions stay quiet"
     assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+
+
+# ---------------------------------------------------------------------------
+# Free-balance spot <-> futures transfers + console command flows
+# ---------------------------------------------------------------------------
+
+
+def test_funds_transfer_both_directions_by_amount(stack):
+    orch, market, sim = stack
+    r = run(orch.transfer_balance("to_futures", 2000.0))
+    assert r.proposals and r.proposals[0]["transfer_kind"] == "DEPOSIT_FUTURES"
+    orch.decide(r.proposals[0]["id"], True)
+    acct = orch.account()
+    assert acct.cash_usdt == pytest.approx(8000.0)
+    assert acct.futures_wallet_usdt == pytest.approx(2000.0)
+
+    r2 = run(orch.transfer_balance("to_spot", 500.0))
+    assert r2.proposals and r2.proposals[0]["transfer_kind"] == "RETURN_WALLET"
+    orch.decide(r2.proposals[0]["id"], True)
+    acct = orch.account()
+    assert acct.cash_usdt == pytest.approx(8500.0)
+    assert acct.futures_wallet_usdt == pytest.approx(1500.0)
+    assert any(a.event == "fund_move_proposed" for a in orch.audit)
+    # the free balance is not margin — total value is unchanged by the moves
+    assert acct.total_value_usdt == pytest.approx(10000.0)
+
+
+def test_funds_transfer_refuses_more_than_available(stack):
+    orch, market, sim = stack
+    r = run(orch.transfer_balance("to_spot", 99999.0))
+    assert not r.proposals
+    assert "free futures balance" in r.message.lower()
+    r2 = run(orch.transfer_balance("to_futures", 99999.0))
+    assert not r2.proposals
+    assert "spot cash" in r2.message.lower()
+
+
+def test_funds_transfer_all_when_no_amount(stack):
+    orch, market, sim = stack
+    run(orch.transfer_balance("to_futures", 1200.0))
+    prop = [p for p in orch.proposals.values() if p.status.value == "PENDING"][0]
+    orch.decide(prop.id, True)
+    # blank amount -> moves the whole source balance
+    r = run(orch.transfer_balance("to_spot", None))
+    orch.decide(r.proposals[0]["id"], True)
+    acct = orch.account()
+    assert acct.futures_wallet_usdt == pytest.approx(0.0)
+    assert acct.cash_usdt == pytest.approx(10000.0)
+
+
+def test_condition_buy_adds_margin_not_sells(stack):
+    """Regression: a BUY ("add margin") condition on an open position must add
+    margin — never sell quantity of the position, and never be blocked by a
+    cooldown right after a trade."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0)          # margin 500, cash 9500
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.quantity == pytest.approx(5.0)
+    # arm an add-margin condition and fire it immediately (cooldown must not apply)
+    run(orch._do_add_condition({
+        "symbol": "BTCUSDT", "op": "BELOW", "price": 1500.0,
+        "side": "BUY", "amount_usdt": 600.0, "note": "add margin",
+    }))
+    market.prices["BTCUSDT"] = 1400.0
+    run(orch.check_conditions())
+    pend = [p for p in orch.proposals.values() if p.status.value == "PENDING"
+            and p.kind.value == "TRANSFER"]
+    assert pend, "condition should queue a TRANSFER add-margin"
+    assert pend[0].transfer_kind.value == "ADD_MARGIN"
+    orch.decide(pend[0].id, True)
+    acct = orch.account()
+    pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
+    assert pos.margin_usdt == pytest.approx(1100.0)        # +600 added
+    assert pos.quantity == pytest.approx(5.0)              # quantity untouched
+    assert acct.cash_usdt == pytest.approx(8900.0)         # cash paid the margin
+
+
+def test_condition_buy_without_position_is_blocked(stack):
+    orch, market, sim = stack
+    run(orch._do_add_condition({
+        "symbol": "BTCUSDT", "op": "BELOW", "price": 1500.0,
+        "side": "BUY", "amount_usdt": 300.0, "note": "",
+    }))
+    market.prices["BTCUSDT"] = 1400.0
+    run(orch.check_conditions())
+    assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    assert any(a.event == "condition_blocked" for a in orch.audit)
+
+
+def test_console_open_margin_transfer_close_end_to_end(stack):
+    """Plain-language console commands drive the whole lifecycle."""
+    orch, market, sim = stack
+    # 1) open via chat
+    r = run(orch.handle_message("open long BTC 500 at 10x"))
+    assert r.intent == "open" and r.proposals, r.message
+    assert r.proposals[0]["kind"] == "OPEN" and r.proposals[0]["symbol"] == "BTCUSDT"
+    orch.decide(r.proposals[0]["id"], True)
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.quantity == pytest.approx(5.0)
+
+    # 2) add margin via chat
+    r2 = run(orch.handle_message("add 200 margin to BTC"))
+    assert r2.intent == "add_margin" and r2.proposals
+    assert r2.proposals[0]["transfer_kind"] == "ADD_MARGIN"
+    orch.decide(r2.proposals[0]["id"], True)
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.margin_usdt == pytest.approx(700.0)
+
+    # 3) deposit free cash into the futures wallet via chat
+    r3 = run(orch.handle_message("move 1000 to futures"))
+    assert r3.intent == "funds" and r3.proposals
+    orch.decide(r3.proposals[0]["id"], True)
+    assert orch.account().futures_wallet_usdt == pytest.approx(1000.0)
+
+    # 4) close via chat
+    r4 = run(orch.handle_message("close BTC"))
+    assert r4.intent == "close" and r4.proposals
+    orch.decide(r4.proposals[0]["id"], True)
+    assert not [p for p in orch.account().futures_positions if p.symbol == "BTCUSDT"]
+
+
+def test_console_rail_edits_and_agent_mode(stack):
+    orch, market, sim = stack
+    r = run(orch.handle_message("set danger zone to 5%"))
+    assert r.intent == "chat" or r.intent == "rail_edit"
+    assert orch.guardrails.liq_danger_pct == pytest.approx(0.05)
+    r2 = run(orch.handle_message("raise leverage cap to 30x"))
+    assert orch.guardrails.max_leverage == pytest.approx(30.0)
+    # auto needs explicit consent phrase
+    r3 = run(orch.handle_message("auto mode"))
+    assert orch.agent_mode == "manual"           # not enabled without consent
+    assert "consent" in r3.message.lower() or "understand" in r3.message.lower()
+    r4 = run(orch.handle_message("I understand - enable auto"))
+    assert orch.agent_mode == "auto"
+    run(orch.handle_message("manual mode"))
+    assert orch.agent_mode == "manual"
+
+
+def test_rails_snapshot_exact_shape(stack):
+    orch, market, sim = stack
+    gs = orch.guardrail_status()
+    assert set(gs["values"].keys()) == {
+        "liq_warn_pct", "liq_danger_pct", "liq_target_dist_pct",
+        "min_trade_value_usdt", "max_leverage",
+    }
+    assert "max_trade_pct" not in gs["values"]
+    assert "cooldown_seconds" not in gs["values"]
+    assert "budget" not in gs
+    assert not hasattr(orch.guardrails, "cooldown_seconds")
+    assert not hasattr(orch.guardrails, "max_trade_pct")

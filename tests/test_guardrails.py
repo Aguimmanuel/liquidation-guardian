@@ -1,19 +1,21 @@
-"""Unit tests for the guardrail engine. Pure logic, no network."""
+"""Unit tests for the guardrail engine. Pure logic, no network.
+
+The engine keeps exactly the checks the app's flows actually use. Removed on
+purpose (they could not work with a protection agent): per-day trade budget,
+max-order-size, cooldown, drawdown-halt — none of which may ever freeze a
+de-risk. The remaining knobs are min-trade-value and the leverage cap, both
+gated elsewhere in the orchestrator; here we test the pure checks.
+"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 from app.agent.guardrails import (
-    check_cash_sufficient,
-    check_cooldown,
-    check_drawdown,
-    check_max_trade_size,
+    check_futures_funds_sufficient,
+    check_futures_position_exists,
     check_min_trade_value,
+    check_spot_funds_sufficient,
     check_symbol_allowed,
-    evaluate_proposal,
 )
 from app.config import GuardrailConfig
-from app.models import AccountState, Position, Side, TradeProposal
 
 
 def cfg(**kw) -> GuardrailConfig:
@@ -21,34 +23,6 @@ def cfg(**kw) -> GuardrailConfig:
     for k, v in kw.items():
         setattr(base, k, v)
     return base
-
-
-def state(total=10_000.0, cash=1_000.0, peak=None, last=None) -> AccountState:
-    return AccountState(
-        total_value_usdt=total,
-        cash_usdt=cash,
-        positions=[
-            Position(symbol="BTCUSDT", base="BTC", quote="USDT",
-                     quantity=0.12, price=60_000.0, value_usdt=7_200.0, weight=0.72),
-            Position(symbol="ETHUSDT", base="ETH", quote="USDT",
-                     quantity=10.0, price=1_800.0, value_usdt=18_000.0, weight=1.8),
-        ],
-        peak_value_usdt=peak or total,
-        realized_pnl_usdt=0.0,
-        last_trade_at=last,
-        updated_at=datetime.now(timezone.utc),
-    )
-
-
-def prop(symbol="BTCUSDT", side=Side.BUY, value=500.0) -> TradeProposal:
-    return TradeProposal(
-        id="t1", symbol=symbol, side=side,
-        est_value_usdt=value, est_quantity=value / 60_000.0,
-        est_price=60_000.0, reason="test",
-    )
-
-
-# ---------------------------------------------------------------------------
 
 
 def test_symbol_allowlist_blocks_and_allows():
@@ -65,87 +39,35 @@ def test_min_trade_value():
     assert not check_min_trade_value(5.0, g).ok
 
 
-def test_max_trade_size():
-    g = cfg(max_trade_pct=0.10)
-    assert check_max_trade_size(900.0, 10_000.0, g).ok
-    assert not check_max_trade_size(1_100.0, 10_000.0, g).ok
+def test_spot_funds_sufficient():
+    assert check_spot_funds_sufficient(1_000.0, 500.0).ok
+    assert not check_spot_funds_sufficient(100.0, 500.0).ok
 
 
-def test_drawdown_halt():
-    g = cfg(max_drawdown_pct=0.15)
-    ok_state = state(total=9_000.0, peak=10_000.0)
-    assert check_drawdown(ok_state, g).ok
-    deep_state = state(total=8_000.0, peak=10_000.0)  # -20%
-    assert not check_drawdown(deep_state, g).ok
+def test_futures_funds_sufficient():
+    assert check_futures_funds_sufficient(800.0, 500.0).ok
+    assert not check_futures_funds_sufficient(100.0, 500.0).ok
 
 
-def test_cooldown():
-    g = cfg(cooldown_seconds=3600)
-    now = datetime.now(timezone.utc)
-    assert check_cooldown(None, now, g).ok
-    assert check_cooldown(now - timedelta(seconds=7200), now, g).ok
-    assert not check_cooldown(now - timedelta(seconds=60), now, g).ok
+def test_futures_position_exists():
+    assert check_futures_position_exists(True, "BTCUSDT").ok
+    assert not check_futures_position_exists(False, "BTCUSDT").ok
 
 
-def test_no_daily_cap_guardrail_exists():
-    """The per-day trade budget was removed: a calendar cap must never freeze
-    protective actions. GuardrailConfig should not even carry the knob."""
-    g = cfg()
-    assert not hasattr(g, "max_daily_trades")
+def test_removed_rails_do_not_exist():
+    """Max order size, cooldown, drawdown halt and the per-day budget were
+    removed: a calendar/portfolio cap must never freeze protective action."""
+    g = GuardrailConfig()
+    for gone in ("max_trade_pct", "cooldown_seconds", "max_drawdown_pct",
+                 "max_daily_trades", "daily_trades_locked", "daily_lock_at",
+                 "drift_threshold_pct"):
+        assert not hasattr(g, gone), gone
 
 
-def test_cash_sufficient():
-    g = cfg(fee_rate=0.001)
-    assert check_cash_sufficient(1_000.0, 500.0, g).ok
-    assert not check_cash_sufficient(100.0, 500.0, g).ok
-
-
-def test_evaluate_proposal_buy_all_checks():
-    g = cfg(symbol_allowlist=["BTCUSDT"], max_trade_pct=0.10,
-            max_drawdown_pct=0.15, cooldown_seconds=3600,
-            fee_rate=0.001, min_trade_value_usdt=10.0)
-    now = datetime.now(timezone.utc)
-    st = state(total=10_000.0, cash=9_000.0, last=now - timedelta(hours=2))
-    allowed, results = evaluate_proposal(prop("BTCUSDT", Side.BUY, 500.0), st, g, now=now)
-    assert allowed
-    assert all(r.ok for r in results)
-
-    # drawdown halts buys
-    st2 = state(total=8_000.0, cash=9_000.0, peak=10_000.0, last=now - timedelta(hours=2))
-    allowed2, results2 = evaluate_proposal(prop("BTCUSDT", Side.BUY, 500.0), st2, g, now=now)
-    assert not allowed2
-    assert any("drawdown" in r.rule for r in results2 if not r.ok)
-
-
-def test_evaluate_proposal_sell_allowed_in_drawdown():
-    g = cfg(symbol_allowlist=["BTCUSDT"], max_trade_pct=0.10,
-            max_drawdown_pct=0.15, cooldown_seconds=3600,
-            fee_rate=0.001, min_trade_value_usdt=10.0)
-    now = datetime.now(timezone.utc)
-    st = state(total=8_000.0, cash=1_000.0, peak=10_000.0, last=now - timedelta(seconds=5))
-    allowed, _ = evaluate_proposal(prop("BTCUSDT", Side.SELL, 500.0), st, g, now=now)
-    assert allowed  # de-risking is always allowed
-
-
-def test_max_trade_size_epsilon_no_false_block():
-    """A leg sized exactly at the cap (float noise ±1e-12) must not be blocked."""
-    g = cfg(max_trade_pct=0.10)
-    total = 9988.10
-    cap = total * g.max_trade_pct  # 998.8099999999999...
-    value = round(cap, 2)          # 998.81 — slightly ABOVE the raw float
-    assert check_max_trade_size(value, total, g).ok
-
-
-def test_evaluate_proposal_cooldown_waivable():
-    g = cfg(symbol_allowlist=["BTCUSDT"], max_trade_pct=0.10,
-            max_drawdown_pct=0.15, cooldown_seconds=3600,
-            fee_rate=0.001, min_trade_value_usdt=10.0)
-    now = datetime.now(timezone.utc)
-    st = state(total=10_000.0, cash=9_000.0, last=now - timedelta(seconds=5))
-    allowed, _ = evaluate_proposal(prop("BTCUSDT", Side.BUY, 500.0), st, g, now=now)
-    assert not allowed  # cooldown blocks by default
-
-    allowed2, results2 = evaluate_proposal(
-        prop("BTCUSDT", Side.BUY, 500.0), st, g, now=now, respect_cooldown=False)
-    assert allowed2
-    assert any("cooldown" in r.rule and r.ok for r in results2)
+def test_config_surfaces_only_live_rails():
+    d = GuardrailConfig().to_dict()
+    for kept in ("liq_warn_pct", "liq_danger_pct", "liq_target_dist_pct",
+                 "min_trade_value_usdt", "max_leverage"):
+        assert kept in d
+    for gone in ("max_trade_pct", "cooldown_seconds", "max_daily_trades"):
+        assert gone not in d

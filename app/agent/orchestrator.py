@@ -23,12 +23,11 @@ from typing import Any, Optional
 from app.adapters.base import ExecutionAdapter
 from app.agent.guardrails import (
     GuardrailConfig,
-    check_cash_sufficient,
+    check_futures_funds_sufficient,
     check_futures_position_exists,
-    check_max_trade_size,
     check_min_trade_value,
+    check_spot_funds_sufficient,
     check_symbol_allowed,
-    check_transfer_sufficient,
 )
 from app.agent.narration import (
     narrate_condition_added,
@@ -86,6 +85,18 @@ class AgentResponse:
             "events": self.events,
             "options": self.options,
         }
+
+
+def _as_float(v: Any) -> Optional[float]:
+    """Best-effort number extraction from parser output (may already be a
+    float, a numeric string, or an unparsable token)."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        return f
+    except (TypeError, ValueError):
+        return None
 
 
 AUTO_MODE_NOTICE = (
@@ -265,7 +276,7 @@ class Orchestrator:
         intent = intent_raw.get("intent", "chat")
         await self.refresh()
 
-        if intent in ("check", "risk"):
+        if intent in ("risk", "check"):
             return await self._do_risk_report()
         if intent in ("protect", "de_risk"):
             return await self._do_de_risk()
@@ -275,7 +286,324 @@ class Orchestrator:
             return await self.market_analysis(intent_raw.get("symbol"))
         if intent == "add_condition":
             return await self._do_add_condition(intent_raw.get("condition", {}))
+        if intent == "open":
+            return await self._console_open(intent_raw)
+        if intent == "close":
+            return await self._console_close(intent_raw)
+        if intent == "add_margin":
+            return await self._console_add_margin(intent_raw)
+        if intent == "release":
+            return await self._console_release(intent_raw)
+        if intent == "funds":
+            return await self._console_funds(intent_raw)
+        if intent == "agent_auto":
+            return await self._console_agent_auto(message)
+        if intent == "agent_manual":
+            return self.set_agent_mode("manual")
+        if intent == "rail_edit":
+            return self._console_rail_edit(intent_raw)
         return await self._do_chat(message)
+
+    # ----------------------------------------------- console command actions
+    async def _console_open(self, p: dict[str, Any]) -> AgentResponse:
+        """“open long BTC 500 at 10x” -> guardrailed OPEN proposal/order."""
+        symbol = str(p.get("symbol") or "").strip().upper()
+        if not symbol:
+            return AgentResponse(
+                message="Which coin? Say e.g. “open long BTC with 500 margin at 10x”.",
+                intent="open",
+                state=self.snapshot(),
+            )
+        margin = _as_float(p.get("margin_usdt") or p.get("amount_usdt"))
+        if margin is None or margin <= 0:
+            return AgentResponse(
+                message="How much margin? Say e.g. “open long BTC 500 at 10x”.",
+                intent="open",
+                state=self.snapshot(),
+            )
+        side = str(p.get("side", "LONG")).upper()
+        if side not in ("LONG", "SHORT"):
+            return AgentResponse(
+                message="Say “long” or “short”, e.g. “open long BTC 500 at 10x”.",
+                intent="open",
+                state=self.snapshot(),
+            )
+        lev = _as_float(p.get("leverage")) or 10.0
+        return await self.queue_open(symbol, side, margin, lev)
+
+    async def _console_close(self, p: dict[str, Any]) -> AgentResponse:
+        symbol = str(p.get("symbol") or "").strip().upper()
+        state = self.account()
+        if str(p.get("close_all") or "").lower() in ("true", "1", "yes", "all"):
+            symbol = ""
+        if not symbol:
+            open_syms = [fp.symbol for fp in state.futures_positions]
+            if not open_syms:
+                return AgentResponse(
+                    message="No open positions to close.",
+                    intent="close",
+                    state=self.snapshot(),
+                )
+            responses = [
+                await self.queue_close(s, close_all=True) for s in open_syms
+            ]
+            lines = [r.message for r in responses]
+            return AgentResponse(
+                message="\n".join(lines),
+                intent="close",
+                state=self.snapshot(),
+            )
+        if not any(fp.symbol == symbol for fp in state.futures_positions):
+            return AgentResponse(
+                message=f"No open {symbol} position to close.",
+                intent="close",
+                state=self.snapshot(),
+            )
+        return await self.queue_close(symbol, close_all=True)
+
+    async def _console_add_margin(self, p: dict[str, Any]) -> AgentResponse:
+        symbol = str(p.get("symbol") or "").strip().upper()
+        amount = _as_float(p.get("amount_usdt") or p.get("margin_usdt"))
+        if not symbol or amount is None or amount <= 0:
+            return AgentResponse(
+                message="Say e.g. “add 300 margin to BTC”.",
+                intent="add_margin",
+                state=self.snapshot(),
+            )
+        return await self.add_margin_to_position(symbol, amount)
+
+    async def _console_release(self, p: dict[str, Any]) -> AgentResponse:
+        symbol = str(p.get("symbol") or "").strip().upper()
+        if not symbol:
+            return AgentResponse(
+                message="Say e.g. “release margin on BTC”.",
+                intent="release",
+                state=self.snapshot(),
+            )
+        return await self.release_margin_to_spot(symbol)
+
+    async def _console_funds(self, p: dict[str, Any]) -> AgentResponse:
+        direction = str(p.get("direction") or "").lower()
+        if direction not in ("to_futures", "to_spot"):
+            return AgentResponse(
+                message='Say e.g. “move 500 to futures” or “move 500 to spot”.',
+                intent="funds",
+                state=self.snapshot(),
+            )
+        amount = _as_float(p.get("amount_usdt"))
+        return await self.transfer_balance(direction, amount)
+
+    async def _console_agent_auto(self, message: str) -> AgentResponse:
+        m = message.lower()
+        consent_words = ("consent", "understand", "confirm", "enable", "yes", "accept")
+        if any(w in m for w in consent_words):
+            return self.set_agent_mode("auto", consent=True)
+        return AgentResponse(
+            message=AUTO_MODE_NOTICE
+            + "\n\nReply “I understand — enable auto” to confirm and switch.",
+            intent="agent",
+            state=self.snapshot(),
+        )
+
+    def _console_rail_edit(self, p: dict[str, Any]) -> AgentResponse:
+        key = p.get("rail_key")
+        value = p.get("rail_value")
+        if not key or value is None:
+            return AgentResponse(
+                message="Say e.g. “set danger zone to 5%”, “raise the leverage cap to 30x” or "
+                "“set min action value to 20”.",
+                intent="rail_edit",
+                state=self.snapshot(),
+            )
+        if key not in EDITABLE_RAIL_KEYS:
+            return AgentResponse(
+                message=f"“{key}” isn't an editable guardrail. Editable: danger zone, watch zone, "
+                "de-risk target, min action value, leverage cap.",
+                intent="rail_edit",
+                state=self.snapshot(),
+            )
+        resp = self.update_guardrails({key: value})
+        return AgentResponse(
+            message=resp.message,
+            intent="chat",
+            state=self.snapshot(),
+        )
+
+    # ------------------------------------------------- funds: free balance <-> spot
+    async def transfer_balance(
+        self,
+        direction: str,
+        amount: Optional[float] = None,
+    ) -> AgentResponse:
+        """Move free balance between spot and the futures wallet (both ways).
+
+        Only *free* balance moves: spot cash <-> futures-wallet USDT. No open
+        position's margin is touched, so liquidation protection is unchanged.
+        ``amount=None`` moves the whole source balance.
+        """
+        direction = (direction or "").lower()
+        if direction not in ("to_futures", "to_spot"):
+            return AgentResponse(
+                message="Direction must be “to_futures” or “to_spot”.",
+                intent="funds",
+                state=self.snapshot(),
+            )
+        await self.refresh()
+        state = self.account()
+        floor = self.guardrails.min_trade_value_usdt
+        if direction == "to_futures":
+            source = "spot cash"
+            have = state.cash_usdt
+            tkind = TransferKind.DEPOSIT_FUTURES
+        else:
+            source = "free futures balance"
+            have = state.futures_wallet_usdt
+            tkind = TransferKind.RETURN_WALLET
+        if amount is None or amount <= 0:
+            amount = have
+        if amount < floor - 1e-6:
+            return AgentResponse(
+                message=(
+                    f"Nothing to move — {source} is ${have:,.2f}, below the "
+                    f"${floor:,.0f} minimum action value."
+                ),
+                intent="funds",
+                state=self.snapshot(),
+            )
+        if amount > have + 1e-6:
+            return AgentResponse(
+                message=f"Only ${have:,.2f} available in {source} — you asked for ${amount:,.2f}.",
+                intent="funds",
+                state=self.snapshot(),
+            )
+        reasons: list[str] = []
+        if tkind == TransferKind.DEPOSIT_FUTURES:
+            r = check_spot_funds_sufficient(state.cash_usdt, amount)
+        else:
+            r = check_futures_funds_sufficient(state.futures_wallet_usdt, amount)
+        if not r.ok:
+            reasons.append(r.reason)
+        r2 = check_min_trade_value(amount, self.guardrails)
+        if not r2.ok:
+            reasons.append(r2.reason)
+        if reasons:
+            self.log(AuditLevel.GUARDRAIL, "fund_move_blocked", "; ".join(reasons))
+            return AgentResponse(
+                message="⛔ Fund move blocked: " + " ".join(reasons),
+                intent="funds",
+                state=self.snapshot(),
+            )
+        verb = "Move" if tkind == TransferKind.RETURN_WALLET else "Deposit"
+        where = (
+            "back to spot cash"
+            if tkind == TransferKind.RETURN_WALLET
+            else "into the free futures wallet"
+        )
+        prop = TradeProposal(
+            id=uuid.uuid4().hex[:10],
+            symbol="USDT",
+            side=Side.BUY,
+            kind=ProposalKind.TRANSFER,
+            transfer_kind=tkind,
+            est_value_usdt=round(amount, 2),
+            est_quantity=0.0,
+            est_price=0.0,
+            reason=(
+                f"{verb} ${amount:,.2f} of {source} {where}. This is free balance — "
+                "no open position's margin is touched, so liquidation protection "
+                "is unchanged."
+            ),
+        )
+        self.proposals[prop.id] = prop
+        self.log(
+            AuditLevel.INFO,
+            "fund_move_proposed",
+            f"{tkind.value} ${amount:,.2f}",
+            prop.id,
+        )
+        if self._auto_active():
+            self.log(
+                AuditLevel.ACTION,
+                "auto_mode",
+                f"automatic mode executed {tkind.value} ${amount:,.2f}",
+                prop.id,
+            )
+            resp = self.decide(prop.id, True)
+            return AgentResponse(
+                message="⚡ " + resp.message + " (automatic mode)",
+                intent="funds",
+                state=self.snapshot(),
+            )
+        return AgentResponse(
+            message=f"📝 {prop.reason} Approve to execute.",
+            intent="funds",
+            state=self.snapshot(),
+            proposals=[prop.to_dict()],
+        )
+
+    async def add_margin_to_position(self, symbol: str, amount: float) -> AgentResponse:
+        """Plain “add $X margin to symbol” — no danger needed. Guardrailed the
+        same way as the de-risk Option B (cash-backed, size-capped by cash)."""
+        symbol = symbol.upper()
+        await self.refresh()
+        state = self.account()
+        if not any(fp.symbol == symbol for fp in state.futures_positions):
+            return AgentResponse(
+                message=f"No open {symbol} position to add margin to.",
+                intent="add_margin",
+                state=self.snapshot(),
+            )
+        prop = TradeProposal(
+            id=uuid.uuid4().hex[:10],
+            symbol=symbol,
+            side=Side.BUY,
+            kind=ProposalKind.TRANSFER,
+            transfer_kind=TransferKind.ADD_MARGIN,
+            est_value_usdt=round(amount, 2),
+            est_quantity=0.0,
+            est_price=0.0,
+            reason=(
+                f"Add ${amount:,.2f} of margin to the open {symbol} position — "
+                f"moves the liquidation price further away and lowers effective "
+                "leverage."
+            ),
+        )
+        allowed, reasons = self._check_de_risk(prop, state)
+        if not allowed:
+            self.log(
+                AuditLevel.GUARDRAIL, "margin_blocked", "; ".join(reasons), prop.id
+            )
+            return AgentResponse(
+                message="⛔ Margin add blocked: " + " ".join(reasons),
+                intent="add_margin",
+                state=self.snapshot(),
+            )
+        self.proposals[prop.id] = prop
+        self.log(
+            AuditLevel.INFO,
+            "margin_proposed",
+            f"{symbol} ${amount:,.2f}",
+            prop.id,
+        )
+        if self._auto_active():
+            self.log(
+                AuditLevel.ACTION,
+                "auto_mode",
+                f"automatic mode added ${amount:,.2f} margin to {symbol}",
+                prop.id,
+            )
+            resp = self.decide(prop.id, True)
+            return AgentResponse(
+                message="⚡ " + resp.message + " (automatic mode)",
+                intent="add_margin",
+                state=self.snapshot(),
+            )
+        return AgentResponse(
+            message=f"📝 Add ${amount:,.2f} margin to {symbol}? Approve to execute.",
+            intent="add_margin",
+            state=self.snapshot(),
+            proposals=[prop.to_dict()],
+        )
 
     async def check_conditions(self) -> list[AgentResponse]:
         """Evaluate armed conditions against live prices (called periodically)."""
@@ -700,31 +1028,19 @@ class Orchestrator:
         ):
             if not result.ok:
                 reasons.append(result.reason)
-        if prop.kind == ProposalKind.TRANSFER:
+        if prop.kind == ProposalKind.TRANSFER and prop.transfer_kind != TransferKind.RELEASE_MARGIN:
+            # ADD_MARGIN / legacy transfers take spot cash -> the futures side.
             reasons += [
                 r.reason
                 for r in [
-                    check_transfer_sufficient(
-                        state.cash_usdt, prop.est_value_usdt, self.guardrails
+                    check_spot_funds_sufficient(
+                        state.cash_usdt, prop.est_value_usdt
                     )
                 ]
                 if not r.ok
             ]
-        elif prop.side == Side.SELL:
-            # REDUCE is de-risking (closing exposure) — exempt from the order-size
-            # cap, exactly like sells in a risk-reduction flow. The notional being
-            # closed is the user's own position, and the action shrinks risk.
-            reasons += []
-        else:
-            reasons += [
-                r.reason
-                for r in [
-                    check_max_trade_size(
-                        prop.est_value_usdt, state.total_value_usdt, self.guardrails
-                    )
-                ]
-                if not r.ok
-            ]
+        # REDUCE (SELL) and RELEASE_MARGIN shrink risk; protective action is
+        # deliberately never capped by portfolio size or a calendar window.
         return not reasons, reasons
 
     # -------------------------------------------------------------- conditions
@@ -757,28 +1073,63 @@ class Orchestrator:
         self, cond: Condition, price: float
     ) -> AgentResponse:
         state = self.account()
-        total = state.total_value_usdt
-        prop = TradeProposal(
-            id=uuid.uuid4().hex[:10],
-            symbol=cond.symbol,
-            side=cond.side,
-            kind=ProposalKind.TRADE,
-            est_value_usdt=min(cond.amount_usdt, total * self.guardrails.max_trade_pct),
-            est_quantity=cond.amount_usdt / price if price else 0.0,
-            est_price=price,
-            reason=f"Condition triggered: {cond.symbol} {cond.op.value} {cond.price:,.2f}",
-            created_at=utcnow(),
+        has_pos = any(
+            fp.symbol == cond.symbol for fp in state.futures_positions
         )
-        from app.agent.guardrails import evaluate_proposal
-
-        allowed, results = evaluate_proposal(prop, state, self.guardrails)
+        if not has_pos:
+            self.log(
+                AuditLevel.GUARDRAIL,
+                "condition_blocked",
+                f"no open {cond.symbol} position to protect",
+            )
+            return AgentResponse(
+                message=f"🚨 Condition fired on {cond.symbol} @ {price:,.2f}, but there is "
+                f"no open {cond.symbol} position to protect.",
+                intent="condition",
+                state=self.snapshot(),
+            )
+        amount = round(float(cond.amount_usdt), 2)
+        if cond.side == Side.BUY:
+            # BUY condition = "add margin" to the open position. This is a real
+            # margin transfer (spot cash -> position margin), never a sell.
+            prop = TradeProposal(
+                id=uuid.uuid4().hex[:10],
+                symbol=cond.symbol,
+                side=Side.BUY,
+                kind=ProposalKind.TRANSFER,
+                transfer_kind=TransferKind.ADD_MARGIN,
+                est_value_usdt=amount,
+                est_quantity=0.0,
+                est_price=0.0,
+                reason=(
+                    f"Condition fired: {cond.symbol} {cond.op.value} {cond.price:,.2f} "
+                    f"→ add ${amount:,.2f} margin"
+                ),
+                created_at=utcnow(),
+            )
+        else:
+            # SELL condition = reduce the open position by ~that notional.
+            prop = TradeProposal(
+                id=uuid.uuid4().hex[:10],
+                symbol=cond.symbol,
+                side=Side.SELL,
+                kind=ProposalKind.TRADE,
+                est_value_usdt=amount,
+                est_quantity=amount / price if price else 0.0,
+                est_price=price,
+                reason=(
+                    f"Condition fired: {cond.symbol} {cond.op.value} {cond.price:,.2f} "
+                    f"→ reduce ≈ ${amount:,.2f}"
+                ),
+                created_at=utcnow(),
+            )
+        allowed, reasons = self._check_de_risk(prop, state)
         if not allowed:
-            reasons = [r.reason for r in results if not r.ok]
             self.log(
                 AuditLevel.GUARDRAIL, "condition_blocked", "; ".join(reasons), prop.id
             )
             return AgentResponse(
-                message=f"🚨 Condition fired on {cond.symbol} @ {price:,.2f}, but guardrails blocked the trade: "
+                message=f"🚨 Condition fired on {cond.symbol} @ {price:,.2f}, but guardrails blocked the action: "
                 + " ".join(reasons),
                 intent="condition",
                 state=self.snapshot(),
@@ -810,13 +1161,24 @@ class Orchestrator:
 
     async def _do_chat(self, message: str) -> AgentResponse:
         state = self.account()
-        base = (
+        lines = [
             f"Here's where we stand: total ${state.total_value_usdt:,.2f}, "
             f"{len(state.futures_positions)} futures position(s) open, "
-            f"{sum(1 for p in state.futures_positions if p.risk.value == 'DANGER')} in the danger zone. "
-            "Try “risk report”, “protect my positions”, or “status”."
+            f"{sum(1 for p in state.futures_positions if p.risk.value == 'DANGER')} in the danger zone.",
+            "",
+            "I take plain-language commands. Try:",
+            "  • “open long BTC 500 at 10x”  /  “open short ETH 300 at 20x”",
+            "  • “close BTC”  /  “close all my positions”",
+            "  • “add 300 margin to BTC”  /  “release margin on BTC”",
+            "  • “move 500 to futures”  /  “move 500 to spot”",
+            "  • “protect my positions”  /  “risk report”  /  “status”",
+            "  • “analyze BTC”  /  “if BTC drops below 60000 add 400 margin”",
+            "  • “set danger zone to 5%”  /  “raise leverage cap to 30x”",
+            "  • “auto mode” (consent first)  /  “manual mode”",
+        ]
+        return AgentResponse(
+            message="\n".join(lines), intent="chat", state=self.snapshot()
         )
-        return AgentResponse(message=base, intent="chat", state=self.snapshot())
 
     # ------------------------------------------------------------- approvals
     def decide(self, proposal_id: str, approve: bool) -> AgentResponse:
@@ -892,6 +1254,11 @@ class Orchestrator:
                     summary = (
                         f"Released ${result.executed_value_usdt:,.2f} excess margin "
                         f"on {result.symbol} back to spot cash"
+                    )
+                elif tkind == TransferKind.DEPOSIT_FUTURES:
+                    summary = (
+                        f"Deposited ${result.executed_value_usdt:,.2f} of spot cash "
+                        f"into the free futures wallet"
                     )
                 else:
                     summary = f"Added ${result.executed_value_usdt:,.2f} margin to {result.symbol}"
@@ -1470,7 +1837,7 @@ class Orchestrator:
         if pos is None:
             return AgentResponse(
                 message=f"No open {symbol} position to release margin from.",
-                intent="return",
+                intent="release",
                 state=self.snapshot(),
             )
         target = self.guardrails.liq_target_dist_pct
@@ -1482,7 +1849,7 @@ class Orchestrator:
                     f"({self.guardrails.liq_warn_pct * 100:.0f}%) so releasing margin "
                     f"can never push {symbol} into a warning state."
                 ),
-                intent="return",
+                intent="release",
                 state=self.snapshot(),
             )
         amount = self._releasable_margin(pos)
@@ -1492,7 +1859,7 @@ class Orchestrator:
                     f"{symbol} currently holds no excess margin to release — its "
                     "margin is exactly what keeps it at the de-risk headroom right now."
                 ),
-                intent="return",
+                intent="release",
                 state=self.snapshot(),
             )
         base = symbol.replace("USDT", "")
@@ -1531,7 +1898,7 @@ class Orchestrator:
             resp = self.decide(prop.id, True)
             return AgentResponse(
                 message="⚡ " + resp.message + " (automatic mode)",
-                intent="return",
+                intent="release",
                 state=self.snapshot(),
             )
         return AgentResponse(
@@ -1539,7 +1906,7 @@ class Orchestrator:
                 f"📝 Release ${amount:,.2f} excess margin on {symbol} back to spot "
                 f"(keeps ≥ {target * 100:.0f}% liquidation headroom)? Approve to execute."
             ),
-            intent="return",
+            intent="release",
             state=self.snapshot(),
             proposals=[prop.to_dict()],
         )
@@ -1681,9 +2048,7 @@ class Orchestrator:
                 "liq_warn_pct": g.liq_warn_pct,
                 "liq_danger_pct": g.liq_danger_pct,
                 "liq_target_dist_pct": g.liq_target_dist_pct,
-                "max_trade_pct": g.max_trade_pct,
                 "min_trade_value_usdt": g.min_trade_value_usdt,
-                "cooldown_seconds": g.cooldown_seconds,
                 "max_leverage": g.max_leverage,
             },
             "symbol_allowlist": list(g.symbol_allowlist),
@@ -1762,8 +2127,6 @@ class Orchestrator:
         """Human-friendly formatting for a guardrail value (messages/audit)."""
         if key.endswith("_pct"):
             return f"{v * 100:g}%"
-        if key == "cooldown_seconds":
-            return f"{v:g}s"
         if key == "max_leverage":
             return f"{v:g}x"
         return f"{v:g}"

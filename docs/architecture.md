@@ -125,33 +125,40 @@ assumption:
 
 ## Guardrail engine (`agent/guardrails.py`)
 
-Every proposal is scored by deterministic checks: symbol allowlist, min trade
-value, max order size (for buys and margin adds — a *reduce* is exempt because
-closing exposure is the safe direction, like sells), cooldown (autonomous
-actions only), leverage cap on opens, and cash/transfer sufficiency. The
-thresholds are user-editable at runtime (`app/agent/orchestrator.py`
-`update_guardrails`) and persisted to `data/guardrail_state.json`, so a profile
-survives restarts. There is deliberately **no per-day trade budget** (a legacy
-cap that could freeze de-risking mid-crash was removed); protection actions
-are never calendar-capped.
+The guardrail engine keeps only checks that protect without ever freezing a
+de-risk: symbol allowlist, min action value (dust floor), spot-cash/transfer
+sufficiency, and position existence. Removed on purpose: the per-day trade
+budget, an order-size cap, and a cooldown — each could block protective action
+at the exact moment a crash needed it, so the guardian is never capped by a
+calendar window or a portfolio-size rule. The user-editable knobs left in the
+UI (danger/warn zones, de-risk target, leverage cap, min action value) all
+genuinely gate flows, are sanity-bounded (`RAIL_BOUNDS`) and persist to
+`data/guardrail_state.json`.
 
 Money movement is two-way. Transfers are a single proposal kind with a
-`transfer_kind` discriminator: `ADD_MARGIN` (spot → futures, the de-risk
-margin top-up), `RETURN_WALLET` (the free futures-wallet balance → spot), and
-`RELEASE_MARGIN` (excess margin on an open position → spot). The release size
-is bounded by `risk.releasable_margin`, which keeps the position at least at
-its de-risk headroom (`liq_target_dist_pct`) **and** its effective leverage
-under the configured cap — so moving money back out can never recreate the
-liquidation risk the guardian exists to prevent. Releasing is refused outright
-while the de-risk target is set at or below the watch zone.
+`transfer_kind` discriminator: `ADD_MARGIN` (spot → position margin, the
+de-risk top-up), `DEPOSIT_FUTURES` (spot cash → free futures wallet),
+`RETURN_WALLET` (free futures wallet → spot), and `RELEASE_MARGIN` (excess
+margin on an open position → spot). Free-balance moves never touch an open
+position's margin; the release size is bounded by `risk.releasable_margin`,
+which keeps the position at least at its de-risk headroom
+(`liq_target_dist_pct`) **and** its effective leverage under the configured
+cap — so moving money back out can never recreate the liquidation risk the
+guardian exists to prevent. Releasing is refused outright while the de-risk
+target is set at or below the watch zone.
 
 ## Intent handling
 
-User messages are parsed to an intent (`protect | risk | status | market |
-add_condition | chat`) by a deterministic keyword parser, with an optional LLM
-parser when a key is configured. Decisions never depend on the LLM. The UI
-drives opens, closes, TP/SL arming and guardrail edits through dedicated JSON
-endpoints (`/api/trade/*`, `/api/tpsl`, `/api/guardrails`).
+User messages are parsed to an intent by a deterministic keyword parser
+(`protect | risk | status | market | add_condition | open | close | add_margin |
+release | funds | agent_auto | agent_manual | rail_edit | chat`), with an
+optional LLM parser when a key is configured. Decisions never depend on the
+LLM — the same intents drive the console and the JSON endpoints
+(`/api/trade/*`, `/api/return`, `/api/funds/transfer`, `/api/tpsl`,
+`/api/guardrails`), so a command typed in the console does exactly what its
+button does. Conditions fire through the same guardrailed proposal path: a
+BUY ("add margin") condition becomes a real margin transfer to the open
+position (it never sells the position), and a SELL condition reduces it.
 
 ## Security model
 
@@ -164,13 +171,13 @@ endpoints (`/api/trade/*`, `/api/tpsl`, `/api/guardrails`).
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (58 tests, no network —
+`tests/` covers the risk engine and feature surface (69 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
 distance and risk zones, `required_cut`/`required_margin`, `margin_for_target`/
-`releasable_margin`, guardrail semantics, text parsers, plus feature tests
-for: dynamic-leverage opens (cap, cash, opposite-side blocks, same-side
-averaging), TP/SL arming and automatic exits on both sides, the always-on
-monitor (zone-change narration, manual escalation queue, autonomous auto de-risk,
-retry throttling, guardrails respected even while a de-risk is blocked), the
-funds round trip (futures-wallet → spot and bounded per-position margin
-release), and the deliberate absence of any per-day trade budget / 24h lock.
+`releasable_margin`, the guardrail checks, the plain-language console parser,
+plus feature tests for: dynamic-leverage opens, TP/SL automatic exits, the
+always-on monitor (manual escalation queue, autonomous auto de-risk, retry
+throttling), the funds round trip in both directions (spot ↔ futures wallet by
+amount, bounded per-position margin release), console-driven open → add-margin
+→ transfer → close lifecycles, the fixed add-margin condition semantics, and
+the deliberate absence of any per-day budget / order-size cap / cooldown.

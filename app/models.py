@@ -194,11 +194,12 @@ class TransferKind(str, Enum):
     """Direction/meaning of a TRANSFER proposal (kept on the proposal so the
     same decide/approve/execute pipeline handles all money movement)."""
 
-    ADD_MARGIN = "ADD_MARGIN"        # spot cash  -> futures (position margin,
-                                     #              or the futures wallet if the
-                                     #              position no longer exists)
-    RETURN_WALLET = "RETURN_WALLET"  # futures wallet free balance -> spot
-    RELEASE_MARGIN = "RELEASE_MARGIN"  # excess margin on an open position -> spot
+    ADD_MARGIN = "ADD_MARGIN"            # spot cash  -> futures (position margin,
+                                         #              or the futures wallet if the
+                                         #              position no longer exists)
+    DEPOSIT_FUTURES = "DEPOSIT_FUTURES"  # spot cash  -> free futures wallet balance
+    RETURN_WALLET = "RETURN_WALLET"      # futures wallet free balance -> spot
+    RELEASE_MARGIN = "RELEASE_MARGIN"    # excess margin on an open position -> spot
 
 
 class ProposalStatus(str, Enum):

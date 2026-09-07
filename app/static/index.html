@@ -235,9 +235,12 @@
   .closebtn:hover{color:var(--red)}
   .relbtn{border:1px solid var(--line);background:transparent;color:var(--grn);cursor:pointer;font-size:13px;line-height:1;border-radius:6px;padding:3px 6px;margin-right:4px}
   .relbtn:hover{background:rgba(80,220,120,.12);border-color:var(--grn)}
-  .walletbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:9px;background:var(--panel2);font-size:12px}
+  .walletbar{display:block;margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:9px;background:var(--panel2);font-size:12px}
   .walletbar .wamt{font-weight:800;font-variant-numeric:tabular-nums}
-  .walletbar .wnote{color:var(--dim);font-size:10.5px;flex-basis:100%}
+  .walletbar .wnote{color:var(--dim);font-size:10.5px;margin-bottom:6px}
+  .walletbar .wfrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:3px 0}
+  .walletbar .wfrow label{min-width:150px}
+  .walletbar .wfrow input{width:110px;padding:4px 6px;font-size:12px;border-radius:7px;font-variant-numeric:tabular-nums;text-align:right}
 
   /* ---------- proposals ---------- */
   .prop{border:1px solid var(--line);border-radius:9px;padding:6px 8px;margin-bottom:5px;background:var(--panel2)}
@@ -807,14 +810,19 @@ function renderPositions(){
   $("posNote").textContent=fps.length+" open"+(danger?" · "+danger+" danger":" · all clear");
   // free futures-wallet balance -> spot control (idle money only; never part
   // of an open position's margin, so returning it can't weaken protection)
-  const wfree=S.account.futures_wallet_usdt||0, wb=$("walletBar");
+  const cash=S.account.cash_usdt||0, wfree=S.account.futures_wallet_usdt||0, wb=$("walletBar");
   if(wb){
-    if(wfree>0){
-      wb.style.display="flex";
-      wb.innerHTML='<span>Free futures balance <span class="wamt">'+fmtP(wfree)+'</span></span>'
-        +'<button class="btn sm grn" onclick="returnWallet()">↩ Move to spot</button>'
-        +'<span class="wnote">Idle USDT sitting in the futures wallet (from closed positions / realized PnL). No open position uses it, so moving it back to spot never reduces liquidation protection.</span>';
-    } else wb.style.display="none";
+    wb.style.display="block";
+    wb.innerHTML=
+      '<div class="wnote" style="flex-basis:100%">Money is never trapped: move free balance between <b>spot</b> and the <b>futures wallet</b> either way. Only free balance moves — no open position\'s margin is touched, so liquidation protection is unchanged.</div>'
+      +'<div class="wfrow"><label>From <b>spot cash</b> <span class="wamt">'+fmtP(cash)+'</span></label>'
+      +'<input id="amtFromSpot" type="number" min="0" step="10" placeholder="amount">'
+      +'<button class="btn sm blu" onclick="fillAmt(\'amtFromSpot\','+cash+')">max</button>'
+      +'<button class="btn sm grn" onclick="fundMove(\'to_futures\',\'amtFromSpot\')">→ Futures wallet</button></div>'
+      +'<div class="wfrow"><label>From <b>futures wallet</b> <span class="wamt">'+fmtP(wfree)+'</span></label>'
+      +'<input id="amtFromWallet" type="number" min="0" step="10" placeholder="amount">'
+      +'<button class="btn sm blu" onclick="fillAmt(\'amtFromWallet\','+wfree+')">max</button>'
+      +'<button class="btn sm grn" onclick="fundMove(\'to_spot\',\'amtFromWallet\')">↩ Spot cash</button></div>';
   }
   const key=posKey(fps);
   if(!fps.length){
@@ -912,14 +920,21 @@ async function releaseMargin(symbol){
     await refreshState();
   }catch(e){ errToast(e.message); }
 }
-async function returnWallet(){
-  const amt=S.account.futures_wallet_usdt||0;
-  if(amt<=0) return;
-  if(!confirm("Move "+fmtP(amt)+" of free futures balance back to spot cash? No open position uses this money.")) return;
+function fillAmt(id,maxVal){
+  const el=document.getElementById(id); if(el) el.value=Math.round(maxVal*100)/100;
+}
+async function fundMove(direction,inputId){
+  const el=document.getElementById(inputId); if(!el) return;
+  const typed=parseFloat(el.value);
+  const amt=(!isNaN(typed)&&typed>0)?typed:null;   // blank/0 = move the whole source balance
+  if(amt===null) el.value="max";
+  const label=direction==="to_futures"?"into the futures wallet":"back to spot cash";
+  if(amt===null&&!confirm("Move the whole available balance "+label+"?")) return;
   try{
-    const r=await api("/api/return",{method:"POST",body:JSON.stringify({scope:"wallet"})});
+    const r=await api("/api/funds/transfer",{method:"POST",body:JSON.stringify({direction,amount_usdt:amt})});
     if(r.state) S=r.state;
-    addMsg(r.message,"agent");
+    if(r.proposals&&r.proposals.length) addMsg(r.message,"agent");
+    else if(r.message) addMsg(r.message,"agent");
     await refreshState();
   }catch(e){ errToast(e.message); }
 }
@@ -935,7 +950,11 @@ function renderProposals(){
   }
   box.innerHTML=list.map(p=>{
     let kindLbl;
-    if(p.kind==="TRANSFER") kindLbl=p.transfer_kind==="RETURN_WALLET"?"MOVE TO SPOT":(p.transfer_kind==="RELEASE_MARGIN"?"RELEASE MARGIN":"ADD MARGIN");
+    if(p.kind==="TRANSFER"){
+      kindLbl=p.transfer_kind==="RETURN_WALLET"?"MOVE TO SPOT":
+        (p.transfer_kind==="DEPOSIT_FUTURES"?"TO FUTURES":
+        (p.transfer_kind==="RELEASE_MARGIN"?"RELEASE MARGIN":"ADD MARGIN"));
+    }
     else kindLbl=p.kind==="OPEN"?"OPEN":(p.kind==="CLOSE"?"CLOSE":"REDUCE");
     return `<div class="prop">
       <div class="r1"><span class="chip-badge ${p.kind}">${kindLbl}</span><b>${esc(p.symbol)}</b>
@@ -966,10 +985,8 @@ const RAIL_KEYS=[
   ["liq_danger_pct","Danger zone","< this = DANGER","%",1],
   ["liq_warn_pct","Watch zone","< this = WATCH","%",1],
   ["liq_target_dist_pct","De-risk target","headroom after action","%",1],
-  ["max_trade_pct","Max order size","per action, % of portfolio","%",1],
   ["min_trade_value_usdt","Min action value","ignore dust orders","$",0],
   ["max_leverage","Leverage cap","max when opening","x",0],
-  ["cooldown_seconds","Cooldown","min gap, auto actions","s",0],
 ];
 function pctToInput(v){ return +(Math.round(v*1000)/10).toFixed(1); }
 function inputToRail(k,v){ return k.endsWith("_pct")? (v/100) : v; }
@@ -1066,6 +1083,8 @@ const SPOKEN={
   auto_protect_scan:"🔭 auto-protect scan", auto_de_risk:"🛡️ auto de-risk",
   monitor_zone:"🛰️ monitoring", de_risk_alert:"🚨 danger — plan queued",
   return_proposed:"↩️ return to spot proposed", release_proposed:"↩️ margin release proposed",
+  fund_move_proposed:"💸 fund move proposed", margin_proposed:"💰 margin add proposed",
+  fund_move_blocked:"⛔ fund move blocked", margin_blocked:"⛔ margin add blocked",
   execution_rejected:"⚠️ declined", auto_mode:"⚡ automatic action",
   agent_mode_auto:"⚡ auto mode on", agent_mode_manual:"🧭 manual mode",
 };
@@ -1171,7 +1190,7 @@ const TOUR=[
   {sel:"#seg",title:"Agent mode",txt:"Manual (default): I propose every action and wait for your approval. Automatic: I act on your behalf after you accept a clear risk notice. You can switch at any time."},
   {sel:"#tradeCard",title:"Trade panel",txt:"Pick a coin from the dropdown. Price sits above the coin name. Long and Short sit side by side — set leverage (blank = 10x, capped by your guardrail) and the USDT margin, then Open. Every order waits for approval unless you're in Auto mode."},
   {sel:"#positions",title:"Positions + money flows",txt:"Each open position shows entry, mark, liquidation price, distance and PnL. Two exits of money: ↩ releases excess margin (keeps the position at its de-risk headroom) and ✕ closes it. When money sits idle in the futures wallet, a bar below the table moves it back to spot — funds are never trapped."},
-  {sel:"#railsRoot",title:"Guardrails",txt:"Edit risk thresholds live: danger zone, watch zone, de-risk target, order size, leverage cap, cooldown and more. There's no per-day trade budget — the guardian only protects, so it can act on danger any hour of any day."},
+  {sel:"#railsRoot",title:"Guardrails",txt:"Edit the risk thresholds live: danger zone, watch zone, de-risk target, leverage cap and min action value. Every knob here genuinely gates what the guardian does — nothing is decorative."},
   {sel:"#proposals",title:"Pending proposals",txt:"In manual mode all actions land here first: de-risks, opens, closes, fund moves, condition triggers. Read the reasoning and Approve or Reject each one — nothing executes without you."},
   {sel:"#btnMore",title:"More tools",txt:"Optional tools live here: market analysis, price conditions, and the audit trail. The main screen stays focused on liquidation protection."},
   {sel:"#input",title:"Talk to it",txt:"Plain language works: “risk report”, “protect my positions”, “market analysis”, “status”, or “if BTC drops below 60,000, add 400 margin”. Have fun — and trade carefully."},

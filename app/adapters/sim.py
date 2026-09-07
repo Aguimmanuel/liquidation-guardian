@@ -286,12 +286,14 @@ class SimAdapter:
         """Move USDT between the spot wallet and the futures side.
 
         TransferKind decides the direction and source:
-          ADD_MARGIN     spot -> futures (position margin, or the futures wallet
-                          if the position no longer exists),
-          RETURN_WALLET  futures wallet free balance -> spot,
-          RELEASE_MARGIN excess margin on an open position -> spot (bounded so
-                          the position keeps its de-risk headroom and never
-                          exceeds the leverage cap).
+          ADD_MARGIN       spot -> futures (position margin, or the futures
+                            wallet if the position no longer exists),
+          DEPOSIT_FUTURES  spot cash -> free futures-wallet balance (no position
+                            is opened; funds just sit ready futures-side),
+          RETURN_WALLET    futures wallet free balance -> spot,
+          RELEASE_MARGIN   excess margin on an open position -> spot (bounded so
+                            the position keeps its de-risk headroom and never
+                            exceeds the leverage cap).
         """
         from app.agent.risk import evaluate_position, releasable_margin
 
@@ -300,19 +302,32 @@ class SimAdapter:
         kind = proposal.transfer_kind or TransferKind.ADD_MARGIN
         amount = proposal.est_value_usdt
 
-        if kind == TransferKind.RETURN_WALLET:
-            take = min(amount, state.futures_wallet_usdt)
-            if take < 1e-9:
-                return OrderResult(
-                    ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
-                    side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
-                    message="the futures wallet has no free balance to return",
-                )
-            state.futures_wallet_usdt -= take
-            state.cash_usdt += take
+        if kind in (TransferKind.RETURN_WALLET, TransferKind.DEPOSIT_FUTURES):
+            if kind == TransferKind.RETURN_WALLET:
+                take = min(amount, state.futures_wallet_usdt)
+                if take < 1e-9:
+                    return OrderResult(
+                        ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                        side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                        message="the futures wallet has no free balance to return",
+                    )
+                state.futures_wallet_usdt -= take
+                state.cash_usdt += take
+            else:  # DEPOSIT_FUTURES: spot cash -> free futures wallet
+                if state.cash_usdt < amount - 1e-9:
+                    return OrderResult(
+                        ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                        side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                        message=f"not enough spot cash: have ${state.cash_usdt:,.2f}",
+                    )
+                take = amount
+                state.cash_usdt -= take
+                state.futures_wallet_usdt += take
             if not bootstrap:
                 state.last_trade_at = utcnow()
             self._save()
+            word = "moved" if kind == TransferKind.RETURN_WALLET else "deposited"
+            where = "the futures wallet back to spot" if kind == TransferKind.RETURN_WALLET else "into the free futures wallet"
             return OrderResult(
                 ok=True,
                 proposal_id=proposal.id,
@@ -321,7 +336,7 @@ class SimAdapter:
                 executed_price=0.0,
                 executed_value_usdt=round(take, 2),
                 fee_usdt=0.0,
-                message=f"moved ${take:,.2f} from the futures wallet back to spot",
+                message=f"{word} ${take:,.2f} {where}",
             )
 
         if kind == TransferKind.RELEASE_MARGIN:
