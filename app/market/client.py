@@ -21,6 +21,50 @@ class MarketDataError(Exception):
     pass
 
 
+def _change_pct_over(closes: list[float], hours: int = 24) -> float:
+    """Percent change over the trailing ``hours`` of 1h closes. The reference
+    is the close from the same wall-clock hour ``hours`` ago (``closes[-h-1]``)
+    — the standard 24h-change definition on hourly bars, used consistently by
+    every analysis path (B9)."""
+    if len(closes) <= hours:
+        return 0.0
+    ref = closes[-(hours + 1)]
+    return (closes[-1] / ref - 1.0) * 100.0 if ref else 0.0
+
+
+def _wilder_rsi(closes: list[float], period: int = 14) -> float:
+    """Wilder's RSI(``period``) on a close series.
+
+    First average = simple mean of the first ``period`` gains/losses, then
+    Wilder smoothing: ``avg = (prev * (period - 1) + cur) / period``. Returns
+    100.0 on ``period``+ straight up-bars and 0.0 on straight down-bars —
+    never a ZeroDivisionError (B7/B8).
+    """
+    if len(closes) <= period:
+        return 50.0
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        d = closes[i] - closes[i - 1]
+        if d >= 0:
+            gains += d
+        else:
+            losses -= d
+    avg_g, avg_l = gains / period, losses / period
+    for i in range(period + 1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        up, dn = (d, 0.0) if d >= 0 else (0.0, -d)
+        avg_g = (avg_g * (period - 1) + up) / period
+        avg_l = (avg_l * (period - 1) + dn) / period
+    if avg_g == 0.0 and avg_l == 0.0:
+        return 50.0
+    if avg_l == 0.0:
+        return 100.0
+    if avg_g == 0.0:
+        return 0.0
+    rs = avg_g / avg_l
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
 class MarketClient:
     def __init__(self, config: AppConfig, http_client: Optional[httpx.AsyncClient] = None):
         self.base = config.market_base_url.rstrip("/")
@@ -148,16 +192,8 @@ class MarketClient:
         if len(closes) < 24:
             return {"symbol": symbol, "signal": "NEUTRAL", "note": "not enough data"}
         price = closes[-1]
-        change_24h = (price / closes[-24] - 1.0) * 100.0 if closes[-24] else 0.0
-        # RSI(14) on hourly closes
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            d = closes[i] - closes[i - 1]
-            gains.append(max(d, 0.0))
-            losses.append(max(-d, 0.0))
-        g = sum(gains[-14:]) / 14
-        l = sum(losses[-14:]) / 14
-        rsi = 100.0 - 100.0 / (1.0 + g / l) if (g + l) > 0 else 50.0
+        change_24h = _change_pct_over(closes, 24)          # same def as analyze_symbol
+        rsi = _wilder_rsi(closes)                           # true Wilder RSI(14)
         # short MAs
         ma7 = sum(closes[-7:]) / 7
         ma25 = sum(closes[-25:]) / 25 if len(closes) >= 25 else ma7
@@ -202,18 +238,10 @@ class MarketClient:
         def pct(a: float, b: float) -> float:
             return (a / b - 1.0) * 100.0 if b else 0.0
 
-        change_24h = pct(price, closes[-25] if len(closes) >= 25 else closes[0])
+        change_24h = _change_pct_over(closes, 24)
         change_7d = pct(price, closes[0]) if len(closes) >= 168 else None
 
-        # RSI(14)
-        gains = losses = 0.0
-        for i in range(1, len(closes)):
-            d = closes[i] - closes[i - 1]
-            gains += max(d, 0.0)
-            losses += max(-d, 0.0)
-        n = len(closes) - 1
-        ag, al = gains / n, losses / n
-        rsi = 100.0 - 100.0 / (1.0 + ag / al) if (ag + al) > 0 else 50.0
+        rsi = _wilder_rsi(closes)                           # true Wilder RSI(14)
 
         ma7 = sum(closes[-7:]) / 7
         ma25 = sum(closes[-25:]) / 25 if len(closes) >= 25 else ma7

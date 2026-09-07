@@ -36,6 +36,7 @@ from app.models import (
     FuturesPosition,
     Position,
     PositionSide,
+    ProposalKind,
     Side,
     TradeProposal,
 )
@@ -54,6 +55,14 @@ TOOL_HINTS = {
     "get_account": ["account", "balance", "portfolio"],
     "place_order": ["order", "trade", "place", "new_order"],
 }
+
+# Every MCP coroutine is bridged through ``MCPSession.run_sync`` and must
+# answer within this window or the call is cancelled and surfaces as a
+# TimeoutError — a dead server can never stall the agent loop forever.
+# 60s (rather than a tighter bound) leaves room for Binance's real
+# confirm-before-execute flow on order placement, which can legitimately
+# take tens of seconds.
+MCP_REQUEST_TIMEOUT_S = 60.0
 
 
 class MCPSession:
@@ -89,10 +98,12 @@ class MCPSession:
             raise RuntimeError("could not start the MCP event loop")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
-            return future.result(timeout=30)
+            return future.result(timeout=MCP_REQUEST_TIMEOUT_S)
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
-            raise TimeoutError("Binance MCP request timed out") from exc
+            raise TimeoutError(
+                f"Binance MCP request timed out after {MCP_REQUEST_TIMEOUT_S:g}s"
+            ) from exc
 
     async def connect(self) -> None:
         if self._client is not None:
@@ -206,6 +217,40 @@ class MCPLiveAdapter:
         return self._parse_account(res)
 
     def execute(self, proposal: TradeProposal) -> OrderResult:
+        """Execute a proposal against the real Binance MCP order tool.
+
+        Only proposals that map onto a real order are sent: CLOSE and TRADE
+        (reduce) close quantity in the market. Everything else fails loudly
+        instead of being mangled into a bogus zero-quantity order — OPEN would
+        need isolated-margin tooling we do not expose, and TRANSFER moves are
+        free-balance bookkeeping with no Binance order behind them.
+        """
+        if proposal.kind == ProposalKind.TRANSFER:
+            return OrderResult(
+                ok=False,
+                proposal_id=proposal.id,
+                symbol=proposal.symbol,
+                side=proposal.side,
+                executed_price=0.0,
+                executed_value_usdt=0.0,
+                message=(
+                    "live mode cannot move free-balance margin: no margin-adjust "
+                    "tool is implemented — use Sim mode for fund transfers"
+                ),
+            )
+        if proposal.est_quantity is None or proposal.est_quantity <= 0:
+            return OrderResult(
+                ok=False,
+                proposal_id=proposal.id,
+                symbol=proposal.symbol,
+                side=proposal.side,
+                executed_price=0.0,
+                executed_value_usdt=0.0,
+                message=(
+                    "proposal has no quantity to trade — refusing to send a "
+                    "zero-quantity market order"
+                ),
+            )
         self._run(self.session.connect())
         tool = self.session.find_tool("place_order")
         if tool is None:

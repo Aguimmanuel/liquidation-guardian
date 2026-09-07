@@ -231,13 +231,15 @@ def test_funds_wallet_roundtrip_returns_to_spot(stack):
     orch.decide(close.proposals[0]["id"], True)
     acct1 = orch.account()
     assert not acct1.futures_positions
-    assert acct1.futures_wallet_usdt == pytest.approx(500.0, abs=0.05)
+    # close pays the taker fee on the closed notional ($5,000 x 0.04% = $2),
+    # so the wallet gets margin 500 - fee 2 = 498
+    assert acct1.futures_wallet_usdt == pytest.approx(498.0, abs=0.05)
     ret = run(orch.return_futures_wallet_to_spot())
     assert ret.proposals and ret.proposals[0]["transfer_kind"] == "RETURN_WALLET"
     orch.decide(ret.proposals[0]["id"], True)
     acct2 = orch.account()
     assert acct2.futures_wallet_usdt == pytest.approx(0.0)
-    assert acct2.cash_usdt == pytest.approx(10000.0, abs=0.05)
+    assert acct2.cash_usdt == pytest.approx(9998.0, abs=0.05)  # 9500 spot + 498 returned
     assert any(a.event == "return_proposed" for a in orch.audit)
 
 
@@ -609,12 +611,12 @@ def test_condition_buy_adds_margin_not_sells(stack):
     _open_long(orch, margin=500.0, leverage=10.0, extra_fund=600.0)
     pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
     assert pos.quantity == pytest.approx(5.0)
-    # arm an add-margin condition and fire it immediately (cooldown must not apply)
+    # arm an add-margin condition below the current price and drop to fire it
     run(orch._do_add_condition({
-        "symbol": "BTCUSDT", "op": "BELOW", "price": 1500.0,
+        "symbol": "BTCUSDT", "op": "BELOW", "price": 800.0,
         "side": "BUY", "amount_usdt": 600.0, "note": "add margin",
     }))
-    market.prices["BTCUSDT"] = 1400.0
+    market.prices["BTCUSDT"] = 700.0
     run(orch.check_conditions())
     pend = [p for p in orch.proposals.values() if p.status.value == "PENDING"
             and p.kind.value == "TRANSFER"]
@@ -632,16 +634,19 @@ def test_condition_buy_adds_margin_not_sells(stack):
 def test_condition_buy_without_position_is_blocked(stack):
     orch, market, sim = stack
     run(orch._do_add_condition({
-        "symbol": "BTCUSDT", "op": "BELOW", "price": 1500.0,
+        "symbol": "BTCUSDT", "op": "BELOW", "price": 800.0,
         "side": "BUY", "amount_usdt": 300.0, "note": "",
     }))
-    market.prices["BTCUSDT"] = 1400.0
+    market.prices["BTCUSDT"] = 700.0
     run(orch.check_conditions())
     assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
     assert any(a.event == "condition_blocked" for a in orch.audit)
+    # one-shot: even a blocked fire disarms the condition so it never retries
+    cond = next(iter(orch.conditions.values()))
+    assert cond.active is False and cond.fires == 1
 
 
-def _arm_below(stack, price=1500.0, amount=400.0):
+def _arm_below(stack, price=800.0, amount=400.0):
     orch, market, sim = stack
     run(orch._do_add_condition({
         "symbol": "BTCUSDT", "op": "BELOW", "price": price,
@@ -650,55 +655,86 @@ def _arm_below(stack, price=1500.0, amount=400.0):
     return orch, market, sim
 
 
-def test_condition_fires_once_per_crossing_not_every_poll(stack):
-    """Regression: a condition whose price stays past the trigger must fire
-    once, then stay silent on every later poll until the price re-crosses —
-    it can never re-queue/re-execute in an infinite loop."""
+def test_condition_fires_once_then_disarms_forever(stack):
+    """One-shot rule: a condition fires once when the price crosses the
+    trigger, then disarms itself. It never re-fires — not while the price
+    stays past the trigger, and not after the price returns and crosses again
+    (no automatic re-arm loop)."""
     orch, market, sim = stack
     _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)  # spare wallet
-    orch, market, sim = _arm_below(stack)
-    market.prices["BTCUSDT"] = 1400.0                      # first crossing below
+    orch, market, sim = _arm_below(stack)                  # BELOW 800, price 1000
+    market.prices["BTCUSDT"] = 700.0                       # first crossing below
     run(orch.check_conditions())
-    assert sum(1 for p in orch.proposals.values()
-               if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
-    # market simply stays below: five more guardian sweeps, zero new proposals
-    for _ in range(5):
-        run(orch.check_conditions())
     assert sum(1 for p in orch.proposals.values()
                if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
     cond = next(iter(orch.conditions.values()))
     assert cond.fires == 1
+    assert cond.active is False, "condition must disarm after its single fire"
+    # market stays below: five more sweeps, zero new proposals
+    for _ in range(5):
+        run(orch.check_conditions())
+    assert sum(1 for p in orch.proposals.values()
+               if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
+    # even after the price returns above and crosses below again, nothing fires
+    market.prices["BTCUSDT"] = 2000.0
+    run(orch.check_conditions())
+    market.prices["BTCUSDT"] = 700.0
+    run(orch.check_conditions())
+    assert sum(1 for p in orch.proposals.values()
+               if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
+    assert next(iter(orch.conditions.values())).fires == 1
 
 
-def test_condition_rearms_after_price_returns(stack):
-    """After the price comes back above the trigger, the same crossing fires
-    the condition again — the latch is an edge detector, not a one-shot."""
+def test_condition_armed_while_price_already_past_waits_for_fresh_crossing(stack):
+    """B12: arming a condition whose trigger the market has already crossed
+    must NOT fire instantly — the latch is seeded at arm time, so the
+    condition waits until the price leaves and re-enters the trigger."""
     orch, market, sim = stack
     _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)  # spare wallet
-    orch, market, sim = _arm_below(stack)
-    market.prices["BTCUSDT"] = 1400.0
-    run(orch.check_conditions())                           # fire #1
-    pending1 = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
-    assert len(pending1) == 1
-    market.prices["BTCUSDT"] = 2000.0                      # back above
-    run(orch.check_conditions())                           # latch re-arms (no fire)
-    market.prices["BTCUSDT"] = 1400.0                      # crossing again
-    run(orch.check_conditions())
-    pending2 = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
-    assert len(pending2) == 2
+    # current BTC price is 1000; arm BELOW 1500 = already satisfied at arm time
+    run(orch._do_add_condition({
+        "symbol": "BTCUSDT", "op": "BELOW", "price": 1500.0,
+        "side": "BUY", "amount_usdt": 300.0, "note": "",
+    }))
+    run(orch.check_conditions())                           # still below 1500: no fire
     cond = next(iter(orch.conditions.values()))
-    assert cond.fires == 2
+    assert cond.fires == 0 and cond.active is True
+    market.prices["BTCUSDT"] = 2000.0                      # leaves the trigger
+    run(orch.check_conditions())
+    market.prices["BTCUSDT"] = 1400.0                      # fresh crossing below
+    run(orch.check_conditions())
+    assert sum(1 for p in orch.proposals.values()
+               if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
+    assert next(iter(orch.conditions.values())).fires == 1
+
+def test_condition_rejects_invalid_price_or_amount(stack):
+    """B12: conditions must carry a positive trigger price and a positive
+    amount; nonsense payloads are refused with a readable message."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)
+    r = run(orch._do_add_condition({
+        "symbol": "BTCUSDT", "op": "BELOW", "price": 0.0,
+        "side": "BUY", "amount_usdt": 300.0,
+    }))
+    assert r.intent == "add_condition" and "positive trigger price" in r.message
+    assert not orch.conditions
+    r2 = run(orch._do_add_condition({
+        "symbol": "BTCUSDT", "op": "BELOW", "price": 800.0,
+        "side": "BUY", "amount_usdt": -50.0,
+    }))
+    assert "positive USDT" in r2.message
+    assert not orch.conditions
 
 
 def test_condition_auto_mode_does_not_drain_funds_on_stale_trigger(stack):
     """In auto mode the worst failure is spending the futures balance each
-    poll; the edge trigger means a stuck-below price executes exactly once."""
+    poll; the one-shot rule means a stuck-below price executes exactly once."""
     orch, market, sim = stack
     # fund 500 margin + 900 spare futures balance (500 cash stays in spot)
     _open_long(orch, margin=500.0, leverage=10.0, extra_fund=900.0)
-    orch, market, sim = _arm_below(stack, price=1500.0, amount=400.0)
+    orch, market, sim = _arm_below(stack, price=800.0, amount=400.0)
     run(orch.handle_message("I understand - enable auto"))
-    market.prices["BTCUSDT"] = 1400.0
+    market.prices["BTCUSDT"] = 700.0
     run(orch.check_conditions())                           # auto executes one margin add
     acct = orch.account()
     pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
@@ -708,6 +744,8 @@ def test_condition_auto_mode_does_not_drain_funds_on_stale_trigger(stack):
     acct = orch.account()
     pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
     assert pos.margin_usdt == pytest.approx(900.0)
+    cond = next(iter(orch.conditions.values()))
+    assert cond.fires == 1 and cond.active is False
     # the second +400 was never spent: 900 spare was deposited, 400 used
     assert acct.futures_wallet_usdt == pytest.approx(500.0)
     assert acct.cash_usdt == pytest.approx(8600.0)         # 1400 moved to futures
@@ -752,7 +790,8 @@ def test_console_open_margin_transfer_close_end_to_end(stack):
     assert r4.intent == "close" and r4.proposals
     orch.decide(r4.proposals[0]["id"], True)
     assert not [p for p in orch.account().futures_positions if p.symbol == "BTCUSDT"]
-    assert orch.account().futures_wallet_usdt == pytest.approx(3000.0, abs=0.5)
+    # flat close at entry: margin 700 returns, minus $2 taker fee on $5,000 notional
+    assert orch.account().futures_wallet_usdt == pytest.approx(2998.0, abs=0.5)
 
 
 def test_console_rail_edits_and_agent_mode(stack):
@@ -841,3 +880,108 @@ def test_add_margin_without_open_position_fails_cleanly(stack):
     out = orch.decide(pending, True)
     assert "no open BTCUSDT position" in out.message, out.message
     assert orch.account().futures_wallet_usdt == pytest.approx(wallet_before)
+
+
+# ---------------------------------------------------------------------------
+# Phase-1 review regressions (B1/B5/B6/B13/B14/B21)
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_risk_summary_has_distinct_open_count_and_ranked_list(stack):
+    """B1: the snapshot must expose a numeric open_count AND the ranked risk
+    list under separate keys — the old duplicate "positions" key let the list
+    overwrite the count (which broke the UI's watch badge)."""
+    orch, market, sim = stack
+    snap = orch.snapshot()
+    rs = snap["risk_summary"]
+    assert rs["open_count"] == 0
+    assert isinstance(rs["positions"], list) and rs["positions"] == []
+    assert rs["danger"] == 0 and rs["watch_count"] == 0
+    _open_danger_long(orch)
+    rs = orch.snapshot()["risk_summary"]
+    assert rs["open_count"] == 1
+    assert len(rs["positions"]) == 1          # ranked list stays intact
+    assert rs["positions"][0]["symbol"] == "BTCUSDT"
+    assert rs["danger"] == 1
+
+
+def test_open_rejects_leverage_outside_exchange_limits(stack):
+    """B14: 1x..125x is a hard-coded exchange limit, not an editable knob —
+    values outside it are refused with a clear message."""
+    orch, market, sim = stack
+    _fund(orch, 6000.0)
+    for bad in (0.5, 126.0, 500.0):
+        resp = run(orch.queue_open("BTCUSDT", "LONG", 500.0, bad))
+        assert not resp.proposals, f"leverage {bad}x must be blocked"
+        assert "125" in resp.message and "leverage" in resp.message.lower(), resp.message
+    good = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 125.0))
+    assert good.proposals, "125x is at the exchange limit and must be accepted"
+
+
+def test_pending_de_risk_plan_does_not_suppress_stop_loss(stack):
+    """B5: a crossed stop-loss must execute even when a non-CLOSE proposal
+    (e.g. the guardian's own de-risk add-margin plan) is still pending on the
+    same symbol — only an in-flight CLOSE should block it."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=400.0)
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    sim.set_tp_sl("BTCUSDT", take_profit=0.0, stop_loss=950.0)
+    # create a pending ADD_MARGIN (non-CLOSE) proposal on the same symbol
+    r = run(orch.handle_message("add 200 margin to BTC"))
+    assert r.intent == "add_margin" and r.proposals
+    pending_id = r.proposals[0]["id"]
+    assert any(
+        p.id == pending_id and p.status.value == "PENDING" for p in orch.proposals.values()
+    )
+    # price crashes through the stop-loss
+    market.prices["BTCUSDT"] = 940.0
+    run(orch.scan_tp_sl())
+    assert not [p for p in orch.account().futures_positions if p.symbol == "BTCUSDT"], (
+        "stop-loss must fire despite the pending add-margin plan"
+    )
+    assert any(a.event == "tp_sl_fired" for a in orch.audit)
+
+
+def test_close_fee_charged_on_notional_not_pnl(stack):
+    """B6+B13: the reported fee on a futures close equals notional x rate (not
+    PnL x rate) and the wallet is credited margin + pnl - that fee."""
+    from app.models import ProposalKind
+
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0)  # qty 5.0 @ price 1000
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.quantity == pytest.approx(5.0)
+    from app.models import TradeProposal as TP
+    from app.models import Side
+
+    close = TP(
+        id="feee000001", symbol="BTCUSDT", side=Side.SELL,
+        est_value_usdt=5500.0, est_quantity=5.0, est_price=1100.0,
+        reason="fee regression", kind=ProposalKind.CLOSE, close_all=True,
+        keep_margin=False,
+    )
+    result = sim.execute(close)
+    assert result.ok, result.message
+    # notional 5 * 1100 = 5500; taker fee 5500 * 0.0004 = 2.2 (NOT pnl 500 * 0.0004 = 0.2)
+    assert result.fee_usdt == pytest.approx(2.2, abs=0.01)
+    acct = orch.account()
+    assert not acct.futures_positions
+    # wallet = margin 500 + pnl (1100-1000)*5 = 500 - fee 2.2 = 997.8
+    assert acct.futures_wallet_usdt == pytest.approx(997.8, abs=0.05)
+
+
+def test_adding_to_position_blends_leverage_not_max(stack):
+    """B21: adding margin/quantity at a lower leverage blends the position's
+    effective leverage by notional instead of keeping max(old, new)."""
+    orch, market, sim = stack
+    _fund(orch, 1000.0)
+    r1 = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 20.0))   # notional 10k
+    orch.decide(r1.proposals[0]["id"], True)
+    _fund(orch, 1000.0)
+    r2 = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))   # notional 5k, same price
+    orch.decide(r2.proposals[0]["id"], True)
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.quantity == pytest.approx(15.0)          # 10 + 5 @ price 1000
+    assert pos.margin_usdt == pytest.approx(1000.0)
+    # blended: total notional 15,000 / margin 1,000 = 15x  (not max(20,10)=20)
+    assert pos.leverage == pytest.approx(15.0, abs=0.01)

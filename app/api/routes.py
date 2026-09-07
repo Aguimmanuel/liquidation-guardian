@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.agent.orchestrator import Orchestrator
+from app.config import MAX_LEVERAGE_X, MIN_LEVERAGE_X
 
 
 # ---------------------------------------------------------------------------
@@ -26,9 +27,9 @@ class DecideIn(BaseModel):
 class ConditionIn(BaseModel):
     symbol: str
     op: str = "BELOW"           # ABOVE | BELOW
-    price: float
+    price: float = Field(gt=0, description="trigger price, must be positive")
     side: str = "BUY"           # BUY | SELL
-    amount_usdt: float = 500.0
+    amount_usdt: float = Field(default=500.0, gt=0, description="USDT to act with")
     note: str = ""
 
 
@@ -36,7 +37,10 @@ class OpenIn(BaseModel):
     symbol: str
     side: str = "LONG"          # LONG | SHORT
     margin_usdt: float = Field(gt=0)
-    leverage: float = Field(default=10.0, gt=0)
+    leverage: float = Field(
+        default=10.0, ge=MIN_LEVERAGE_X, le=MAX_LEVERAGE_X,
+        description="Binance USDⓈ-M exchange limit: 1x..125x",
+    )
 
 
 class CloseIn(BaseModel):
@@ -183,6 +187,11 @@ def build_router(orch: Orchestrator) -> APIRouter:
 
     @router.delete("/conditions/{condition_id}")
     async def delete_condition(condition_id: str) -> dict[str, Any]:
+        if condition_id not in orch.conditions:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No condition with id {condition_id!r} is armed.",
+            )
         orch.conditions.pop(condition_id, None)
         return {"ok": True, "state": orch.snapshot()}
 

@@ -112,8 +112,10 @@
   .flash-down{animation:flashDown .8s ease-out 1}
 
   /* ---------- layout: left console column (40%) + right dashboard ---------- */
-  main{max-width:1500px;margin:0 auto;padding:14px 18px 30px;min-height:calc(100vh - 120px);
+  main{width:min(1720px,92%);margin:14px auto 30px;min-height:calc(100vh - 120px);
     display:grid;grid-template-columns:minmax(280px,40%) minmax(0,1fr);gap:14px;align-items:stretch}
+  main>.stats{grid-column:1 / -1;align-self:start}   /* account bar spans the full page width,
+      but must hug its own content — a tall sibling row must not stretch it */
   .leftcol{display:flex;flex-direction:column;gap:14px;min-width:0}
   .rightcol{display:flex;flex-direction:column;gap:12px;min-width:0}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--rad);padding:12px 14px;box-shadow:var(--sh)}
@@ -181,7 +183,7 @@
   .thinking{color:var(--dim)}
 
   /* ---------- stats ---------- */
-  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(188px,1fr));gap:8px}
   .tile{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:7px 10px}
   .tile .lbl{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;font-weight:700}
   .tile .val{font-size:18px;font-weight:800;margin-top:1px;font-variant-numeric:tabular-nums}
@@ -246,23 +248,18 @@
   .closebtn:hover{color:var(--red)}
   .relbtn{border:1px solid var(--line);background:transparent;color:var(--grn);cursor:pointer;font-size:13px;line-height:1;border-radius:4px;padding:3px 6px;margin-right:4px}
   .relbtn:hover{background:rgba(14,203,129,.12);border-color:var(--grn)}
-  .walletbar{display:block;margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:6px;background:var(--bg2);font-size:12px}
-  .trtop{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-bottom:7px}
-  .trtop h2{margin-bottom:0}
-  #tradeCard .walletbar{margin:0 0 0 auto;padding:5px 7px;font-size:11px;min-width:220px;max-width:250px}
-  #tradeCard .walletbar .wnote{display:none}
-  #tradeCard .walletbar .wfrow{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:4px;padding:1px 0}
-  #tradeCard .walletbar .wfrow label{min-width:0;margin:0;font-size:10px;white-space:nowrap;display:inline-flex;align-items:baseline;gap:4px}
-  #tradeCard .walletbar .wfrow .wamt{font-size:10.5px}
-  #tradeCard .walletbar .wfrow input{width:100%;min-width:34px;max-width:64px;padding:2px 4px;font-size:11px}
-  #tradeCard .walletbar .btn{padding:2px 6px;font-size:10.5px;border-radius:4px;white-space:nowrap}
-  #tradeCard .walletbar .btn.primary{padding:2px 7px}
-  #tradeCard .walletbar .btn.max{padding:2px 6px}
-  .walletbar .wamt{font-weight:800;font-variant-numeric:tabular-nums;color:var(--grn)}
-  .walletbar .wnote{color:var(--dim);font-size:10.5px;margin-bottom:6px}
-  .walletbar .wfrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:3px 0}
-  .walletbar .wfrow label{min-width:150px;color:var(--mut)}
-  .walletbar .wfrow input{width:110px;padding:4px 6px;font-size:12px;border-radius:4px;font-variant-numeric:tabular-nums;text-align:right}
+  .fundsTile{display:flex;flex-direction:column;min-width:0}
+  .fundsTile .wtip{cursor:help;opacity:.7;font-size:9px}
+  #walletBar{display:grid;gap:4px;margin-top:3px;min-width:0}
+  #walletBar .wsum{display:flex;justify-content:space-between;gap:8px;font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
+  #walletBar .wsum .wamt{color:var(--grn);font-weight:800}
+  #walletBar .wrow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:4px;align-items:center;min-width:0}
+  #walletBar input{width:100%;min-width:0;padding:3px 5px;font-size:11px;border-radius:4px;
+    font-variant-numeric:tabular-nums;text-align:right;background:var(--panel);border:1px solid var(--line);color:var(--txt)}
+  #walletBar .btn{padding:3px 7px;font-size:10.5px;border-radius:4px;white-space:nowrap}
+  #walletBar .btn.primary{background:var(--grn);border:none;color:#07130f}
+  #walletBar .btn.primary:hover{filter:brightness(1.1);color:#07130f}
+  #walletBar .btn.max{padding:3px 6px}
 
   /* ---------- proposals ---------- */
   .prop{border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:5px;background:var(--panel2)}
@@ -375,6 +372,18 @@
 <div id="ticker"></div>
 
 <main>
+  <!-- Account bar: total value / spot / futures / nearest liq / fund transfer -->
+  <div class="stats">
+    <div class="tile"><div class="lbl">Total value</div><div class="val" id="tTotal">—</div><div class="sub" id="tDraw">drawdown —</div></div>
+    <div class="tile"><div class="lbl">Spot cash</div><div class="val" id="tCash">—</div><div class="sub" id="tSpot">holdings —</div></div>
+    <div class="tile"><div class="lbl">Futures equity</div><div class="val" id="tFut">—</div><div class="sub" id="tUnreal">wallet —</div></div>
+    <div class="tile"><div class="lbl">Nearest liq</div><div class="val" id="tNear">—</div><div class="sub" id="tNearSub">no positions</div></div>
+    <div class="tile fundsTile">
+      <div class="lbl">Fund transfer <span class="wtip" title="Margin is drawn from the futures wallet — deposit spot cash here before trading. Closing/releasing parks money back in the futures wallet; use ↑ to spot to move it home.">ⓘ</span></div>
+      <div id="walletBar" style="display:none"></div>
+    </div>
+  </div>
+
   <!-- ===== LEFT (40%): Guardian console above Pending proposals ===== -->
   <aside class="leftcol">
     <div class="card chatcard">
@@ -401,23 +410,11 @@
   <!-- ===== RIGHT (60%): dashboard ===== -->
   <section class="rightcol">
 
-    <div class="stats">
-      <div class="tile"><div class="lbl">Total value</div><div class="val" id="tTotal">—</div><div class="sub" id="tDraw">drawdown —</div></div>
-      <div class="tile"><div class="lbl">Spot cash</div><div class="val" id="tCash">—</div><div class="sub" id="tSpot">holdings —</div></div>
-      <div class="tile"><div class="lbl">Futures equity</div><div class="val" id="tFut">—</div><div class="sub" id="tUnreal">wallet —</div></div>
-      <div class="tile"><div class="lbl">Nearest liq</div><div class="val" id="tNear">—</div><div class="sub" id="tNearSub">no positions</div></div>
-    </div>
-
     <!-- Trade (left) and Price conditions (right) sit side by side; the pair
          spans the exact width of the Guardrails card below. -->
     <div class="duocard">
       <div class="card" id="tradeCard">
-        <div class="trtop">
-          <h2>Trade <span class="hint">USDTⓈ-M futures</span></h2>
-          <!-- Funds control at the top-right of the Trade box. The futures wallet
-               is the margin source (Binance model): deposit from spot first. -->
-          <div class="walletbar" id="walletBar" style="display:none"></div>
-        </div>
+        <h2>Trade <span class="hint">USDTⓈ-M futures</span></h2>
         <div class="tradeselect">
           <label style="font-size:11px;color:var(--mut);font-weight:700">Coin</label>
           <select id="selCoin"></select>
@@ -904,18 +901,16 @@ function renderWalletBar(){
   const cash=(S&&S.account)?(S.account.cash_usdt||0):0;
   const wfree=(S&&S.account)?(S.account.futures_wallet_usdt||0):0;
   if(!wb.dataset.built){
-    wb.style.display="block";
+    wb.style.display="grid";
     wb.dataset.built="1";
     wb.innerHTML=
-      '<div class="wnote">Futures wallet is the margin source (Binance model): deposit from spot here before you trade.</div>'
-      +'<div class="wfrow"><label>Spot <span class="wamt" id="wbalSpot"></span></label>'
-      +'<input id="amtFromSpot" type="number" min="0" step="1" placeholder="amt" title="Blank = whole spot balance">'
+      '<div class="wsum"><span>Spot <b class="wamt" id="wbalSpot">—</b></span><span>Futures <b class="wamt" id="wbalFut">—</b></span></div>'
+      +'<div class="wrow"><input id="amtFromSpot" type="number" min="0" step="1" placeholder="amount" title="Blank = move the whole spot balance">'
       +'<button class="btn max" id="btnMaxSpot" title="Fill the whole spot balance">max</button>'
-      +'<button class="btn primary" id="btnToFutures" title="Deposit spot cash into the futures wallet — required before opening or adding margin">↓ to futures</button></div>'
-      +'<div class="wfrow"><label>Futures <span class="wamt" id="wbalFut"></span></label>'
-      +'<input id="amtFromWallet" type="number" min="0" step="1" placeholder="amt" title="Blank = whole futures balance">'
+      +'<button class="btn primary" id="btnToFutures" title="Deposit spot cash into the futures wallet — required before trading">↓ to futures</button></div>'
+      +'<div class="wrow"><input id="amtFromWallet" type="number" min="0" step="1" placeholder="amount" title="Blank = move the whole futures balance">'
       +'<button class="btn max" id="btnMaxWallet" title="Fill the whole futures balance">max</button>'
-      +'<button class="btn" id="btnToSpot" title="Move free futures balance back to spot cash">↩ to spot</button></div>';
+      +'<button class="btn" id="btnToSpot" title="Move free futures balance back to spot cash">↑ to spot</button></div>';
     $("btnMaxSpot").addEventListener("click",()=>fillAmt("amtFromSpot"));
     $("btnMaxWallet").addEventListener("click",()=>fillAmt("amtFromWallet"));
     $("btnToFutures").addEventListener("click",()=>fundMove("to_futures","amtFromSpot"));
@@ -1062,10 +1057,15 @@ function refreshGuardrailReadouts(){
 function renderConditions(){
   const box=$("conditions");
   if(!S.conditions.length){ box.innerHTML='<div class="empty">No conditions armed. Example: “if BTC drops below 60,000, add 400 margin”.</div>'; return; }
-  box.innerHTML=S.conditions.map(c=>
-    `<div class="cond-item"><span><b>${esc(c.symbol)}</b> ${c.op==="ABOVE"?"goes above":"drops below"} ${fmtP(c.price)}
+  box.innerHTML=S.conditions.map(c=>{
+    const state = (!c.active && c.fires>0)
+      ? '<span class="chip-badge" style="background:var(--grnbg);color:var(--grn)">fired · closed</span>'
+      : (c.active
+          ? '<span class="chip-badge" style="background:var(--blubg);color:var(--blu)">armed</span>'
+          : '<span class="chip-badge" style="background:var(--ambbg);color:var(--amb)">off</span>');
+    return `<div class="cond-item"><span><b>${esc(c.symbol)}</b> ${c.op==="ABOVE"?"goes above":"drops below"} ${fmtP(c.price)}
       → ${c.side==="BUY"?"add margin":"reduce"} ${fmtP(c.amount_usdt)} <span style="color:var(--dim)">· fired ${c.fires}×</span></span>
-      <button class="btn sm red" onclick="removeCond('${c.id}')">✕</button></div>`).join("");
+      ${state}<button class="btn sm red" onclick="removeCond('${c.id}')">✕</button></div>`;}).join("");
 }
 async function removeCond(id){ try{ await api("/api/conditions/"+id,{method:"DELETE"}); await refreshState(); }catch(e){ errToast(e.message); } }
 $("btnCond").addEventListener("click",async()=>{
@@ -1180,9 +1180,13 @@ async function refreshState(){
     if(first){ buildRails(); }
     renderStats(); renderPositions(); renderProposals(); renderConditions(); renderAudit();
     refreshGuardrailReadouts(); renderAgentMode(); renderTradeSel();
-    // live monitoring indicator: how many positions the guardian is tracking
-    const mon=$("monBadge"); const n=(s.risk_summary&&s.risk_summary.positions)||0;
-    if(mon){ if(n>0){ mon.style.display=""; mon.textContent="🛡️ watching "+n+" position"+(n===1?"":"s"); } else { mon.style.display="none"; } }
+    // live monitoring indicator: how many positions need watching right now
+    // (WATCH + DANGER). Uses the dedicated counts — the ranked risk list lives
+    // under risk_summary.positions and must never be treated as a number.
+    const mon=$("monBadge");
+    const rs=s.risk_summary||{};
+    const watched=(rs.danger||0)+(rs.watch_count||0);
+    if(mon){ if(watched>0){ mon.style.display=""; mon.textContent="🛡️ watching "+watched+" position"+(watched===1?"":"s"); } else { mon.style.display="none"; } }
   }catch(e){
     setOnline(false);
     if(S) S=null;   // force panels to reset on recovery
@@ -1194,8 +1198,8 @@ const TOUR=[
   {sel:"#btnHelp",title:"Welcome to Liquidation Guardian",txt:"Your futures risk-protection agent for Binance. I watch your open positions, compute live liquidation prices, and act — with your approval by default. This tour walks through every feature (90 seconds)."},
   {sel:"#ticker",title:"Live prices",txt:"BTC, ETH, BNB and SOL stream here in real time, with 24h change. Prices flash green/red the instant they move. This is the same feed used to mark your positions."},
   {sel:"#seg",title:"Agent mode",txt:"Manual (default): I propose every action and wait for your approval. Automatic: I act on your behalf after you accept a clear risk notice. You can switch at any time."},
-  {sel:"#tradeCard",title:"Trade panel",txt:"Pick a coin from the dropdown. Long and Short sit side by side — set the leverage (10x if blank) and the USDT margin, then Open. Every order waits for approval unless you're in Auto mode. The wallet control at the top right moves funds between spot and the futures wallet: margin is taken from the futures wallet, so deposit before you trade (Binance-style)."},
-  {sel:"#positions",title:"Open positions",txt:"Each open position shows entry, mark, liquidation price, distance and PnL. ↩ releases excess margin back to the futures wallet (keeping the position at its de-risk headroom) and ✕ closes it. Closing and releasing both land funds in the futures wallet — move them to spot with the wallet control in the Trade panel."},
+  {sel:"#tradeCard",title:"Trade panel",txt:"Pick a coin from the dropdown. Long and Short sit side by side — set the leverage (10x if blank) and the USDT margin, then Open. Every order waits for approval unless you're in Auto mode. Margin is taken from the futures wallet — the Fund transfer box up in the stats row moves spot cash there first (Binance-style)."},
+  {sel:"#positions",title:"Open positions",txt:"Each open position shows entry, mark, liquidation price, distance and PnL. ↩ releases excess margin back to the futures wallet (keeping the position at its de-risk headroom) and ✕ closes it. Closing and releasing both land funds in the futures wallet — move them home to spot with the Fund transfer box in the stats row."},
   {sel:"#chatcard",title:"Guardian console",txt:"The left rail stacks the console right above Pending Proposals so you can act fast. Type commands (“deposit 2000 to futures”, “open long BTC 500 at 10x”, “add 200 margin to BTC”) or just ask questions. With an OpenAI-compatible key configured it's an open-ended agent; without one it still understands the full command set."},
   {sel:"#proposals",title:"Pending proposals",txt:"Everything the agent wants to do lands here: de-risks, opens, closes, fund moves, condition triggers. Read the reasoning, then Approve or Reject — nothing executes without you in manual mode."},
   {sel:"#railsRoot",title:"Guardrails",txt:"Edit the three risk thresholds that actually matter: danger zone, watch zone and de-risk target. No decorative knobs remain."},

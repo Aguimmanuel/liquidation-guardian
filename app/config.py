@@ -33,6 +33,15 @@ RAIL_BOUNDS: dict[str, tuple[float, float]] = {
     "liq_target_dist_pct": (0.0, 1.0),
 }
 
+# ---------------------------------------------------------------------------
+# Exchange limits (hard-coded, never user-editable — Binance USDⓈ-M futures
+# allow 1x..125x leverage; we mirror that ceiling instead of inventing a
+# "safer" cap that could freeze a protective action).
+# ---------------------------------------------------------------------------
+
+MIN_LEVERAGE_X: float = 1.0
+MAX_LEVERAGE_X: float = 125.0
+
 
 # ---------------------------------------------------------------------------
 # Guardrails: hard limits the agent can never cross, mirroring the philosophy

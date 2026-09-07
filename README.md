@@ -145,7 +145,7 @@ with a small amount in the sub-account and work up.
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 71 unit tests, no network needed
+python -m pytest tests/ -q            # 89 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```

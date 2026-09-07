@@ -7,8 +7,11 @@ The agent loop — the "brain" of the Liquidation Guardian:
     -> execute -> audit
 
 Every decision path is deterministic and guardrailed; the LLM (optional) only
-improves narration and free-text intent parsing. Nothing executes without an
-explicit human approve, mirroring Binance Agent OS's confirm-before-execute.
+improves narration and free-text intent parsing. Manual mode is the default:
+nothing executes without an explicit approve there, mirroring Binance Agent
+OS's confirm-before-execute. The two exceptions are deliberate and visible —
+opt-in Automatic mode, and armed take-profit/stop-loss levels, which execute
+on crossing without waiting for approval.
 """
 
 from __future__ import annotations
@@ -45,6 +48,8 @@ from app.agent.risk import (
 )
 from app.config import (
     EDITABLE_RAIL_KEYS,
+    MAX_LEVERAGE_X,
+    MIN_LEVERAGE_X,
     RAIL_BOUNDS,
     AppConfig,
 )
@@ -255,8 +260,11 @@ class Orchestrator:
             "agent": {"mode": self.agent_mode, "consent": self.auto_consent},
             "guardrail_status": guardrail_status,
             "risk_summary": {
-                "positions": len(state.futures_positions),
+                "open_count": len(state.futures_positions),
                 "danger": len(danger),
+                "watch_count": sum(
+                    1 for p in state.futures_positions if p.risk.value == "WATCH"
+                ),
                 "nearest_distance_pct": round(
                     min((p.distance_pct for p in state.futures_positions), default=1.0)
                     * 100,
@@ -611,11 +619,12 @@ class Orchestrator:
     async def check_conditions(self) -> list[AgentResponse]:
         """Evaluate armed conditions against live prices (called periodically).
 
-        Edge-triggered: a condition fires *once* when the price first crosses
-        its trigger, then re-arms only after the price comes back the other
-        way. Staying past the trigger never re-proposes or re-executes — that
-        would otherwise spam the approval queue (and drain cash in auto mode)
-        on every 2s poll while a coin simply trades beyond the price.
+        One-shot: a condition fires at most *once* when its trigger first
+        crosses, then disarms itself (active=False) so it can never loop.
+        Staying past the trigger never re-proposes — that would otherwise spam
+        the approval queue (and drain the futures wallet in auto mode) on every
+        2s poll while a coin simply trades beyond the price. Create a fresh
+        condition for another shot.
         """
         if not self.conditions:
             return []
@@ -639,17 +648,26 @@ class Orchestrator:
             hit = (cond.op == ConditionOp.ABOVE and price >= cond.price) or (
                 cond.op == ConditionOp.BELOW and price <= cond.price
             )
+            # `_was_hit` is seeded at arm time so a freshly armed condition
+            # never fires instantly on an already-stale crossing; it waits for
+            # a fresh entry past the trigger.
             if hit and cond._was_hit:
-                continue  # already fired on this crossing — do not re-fire
+                continue  # price was already past the trigger when armed
             cond._was_hit = hit
             if not hit:
-                continue  # armed again for the next crossing
+                continue
             cond.fires += 1
             cond.last_fired_at = utcnow()
+            cond.active = False  # one-shot: executes once, then disarms
             self.log(
                 AuditLevel.ACTION,
                 "condition_fired",
                 f"{cond.symbol} {cond.op.value} {cond.price} @ {price:.2f}",
+            )
+            self.log(
+                AuditLevel.INFO,
+                "condition_closed",
+                f"{cond.symbol} {cond.op.value} {cond.price} — disarmed after firing once",
             )
             resp = await self._propose_condition_trade(cond, price)
             if resp:
@@ -1076,6 +1094,22 @@ class Orchestrator:
                 intent="add_condition",
                 state=self.snapshot(),
             )
+        if not (math.isfinite(c.price) and c.price > 0):
+            return AgentResponse(
+                message="⚠️ That condition needs a positive trigger price (e.g. 60,000).",
+                intent="add_condition",
+                state=self.snapshot(),
+            )
+        if not (math.isfinite(c.amount_usdt) and c.amount_usdt > 0):
+            return AgentResponse(
+                message="⚠️ The condition amount must be a positive USDT figure.",
+                intent="add_condition",
+                state=self.snapshot(),
+            )
+        # Seed the latch from the current price: if the market is already past
+        # the trigger, the condition waits for a fresh crossing instead of
+        # firing instantly on a stale arm.
+        c._was_hit = await self._condition_satisfied_now(c)
         self.conditions[c.id] = c
         self.log(AuditLevel.ACTION, "condition_added", c.symbol)
         return AgentResponse(
@@ -1083,6 +1117,18 @@ class Orchestrator:
             intent="add_condition",
             state=self.snapshot(),
         )
+
+    async def _condition_satisfied_now(self, cond: Condition) -> bool:
+        """True when the current market price already satisfies the trigger."""
+        try:
+            px = (await self.market.get_ticker(cond.symbol)).price
+        except Exception:
+            return False
+        if not px or px <= 0:
+            return False
+        if cond.op == ConditionOp.ABOVE:
+            return px >= cond.price
+        return px <= cond.price
 
     async def _propose_condition_trade(
         self, cond: Condition, price: float
@@ -1631,8 +1677,9 @@ class Orchestrator:
         )
         _note(margin_usdt > 0, "margin must be a positive amount")
         _note(
-            leverage > 0,
-            "leverage must be a positive number of x",
+            MIN_LEVERAGE_X <= leverage <= MAX_LEVERAGE_X,
+            f"leverage must be between {MIN_LEVERAGE_X:.0f}x and {MAX_LEVERAGE_X:.0f}x "
+            f"(Binance USDTⓈ-M exchange limit)",
         )
         _note(
             state.futures_wallet_usdt >= margin_usdt,
@@ -2024,9 +2071,13 @@ class Orchestrator:
                 continue
             kind_word = "stop-loss" if hit_sl else "take-profit"
             level = pos.stop_loss_price if hit_sl else pos.take_profit_price
-            # don't re-fire while a close attempt is already pending/executing
+            # don't double-close while a CLOSE for this symbol is already in
+            # flight — but never let a guardian de-risk/add-margin plan or an
+            # unrelated pending proposal suppress a hard stop-loss.
             if any(
-                pp.symbol == pos.symbol and pp.status == ProposalStatus.PENDING
+                pp.symbol == pos.symbol
+                and pp.status == ProposalStatus.PENDING
+                and pp.kind == ProposalKind.CLOSE
                 for pp in self.proposals.values()
             ):
                 continue

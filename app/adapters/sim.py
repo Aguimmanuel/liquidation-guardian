@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Optional
 
 from app.adapters.base import OrderResult
-from app.config import AppConfig, GuardrailConfig
+from app.config import (
+    MAX_LEVERAGE_X,
+    MIN_LEVERAGE_X,
+    AppConfig,
+    GuardrailConfig,
+)
 from app.market.client import MarketClient, MarketDataError
 from app.models import (
     AccountState,
@@ -219,10 +224,11 @@ class SimAdapter:
 
         price = proposal.est_price if proposal.est_price > 0 else proposal.executed_price or 0.0
         is_futures = self._has_futures_position(proposal.symbol)
+        fee = 0.0  # tracked per path so the reported fee matches the real one
 
         if is_futures or proposal.kind == ProposalKind.CLOSE:
             # futures path: CLOSE (reduce / exit) or TRADE reduce
-            wallet_add = self._close_futures(
+            wallet_add, fee = self._close_futures(
                 proposal.symbol,
                 proposal.est_quantity,
                 price,
@@ -234,6 +240,7 @@ class SimAdapter:
                 return OrderResult(
                     ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
                     side=proposal.side, executed_price=price, executed_value_usdt=0.0,
+                    fee_usdt=0.0,
                     message="nothing to close at execution time",
                 )
             state.futures_wallet_usdt += wallet_add
@@ -278,7 +285,7 @@ class SimAdapter:
             side=proposal.side,
             executed_price=price,
             executed_value_usdt=round(executed, 2),
-            fee_usdt=round(executed * self.guardrails.futures_fee_rate, 2),
+            fee_usdt=round(fee, 2),
             message="simulated fill at mark price",
         )
 
@@ -432,6 +439,15 @@ class SimAdapter:
         assert state is not None
         margin = proposal.open_margin_usdt
         leverage = proposal.open_leverage or 10.0  # explicit or default 10x
+        if not (MIN_LEVERAGE_X <= leverage <= MAX_LEVERAGE_X):
+            return OrderResult(
+                ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                message=(
+                    f"leverage must be between {MIN_LEVERAGE_X:.0f}x and "
+                    f"{MAX_LEVERAGE_X:.0f}x (Binance USDTⓈ-M exchange limit)"
+                ),
+            )
         price = proposal.est_price if proposal.est_price > 0 else 0.0
         if price <= 0:
             return OrderResult(
@@ -439,6 +455,9 @@ class SimAdapter:
                 side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
                 message="no market price available to open",
             )
+        # Open fees are intentionally not modelled (the demo funds its wallet
+        # in whole amounts); the taker fee IS modelled on the close leg, where
+        # it is charged on the closed notional (see _close_futures).
         if state.futures_wallet_usdt < margin - 1e-9:
             return OrderResult(
                 ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
@@ -459,12 +478,16 @@ class SimAdapter:
         state.futures_wallet_usdt -= margin
         qty = (margin * leverage) / price
         if existing is not None:
-            # add to existing same-side position (avg entry)
+            # add to existing same-side position (avg entry): blend entry price,
+            # margin and the displayed leverage by the new notional instead of
+            # taking max() of the two leverage figures.
             total_margin = existing.margin_usdt + margin
             existing.entry_price = (existing.entry_price * existing.quantity + price * qty) / (existing.quantity + qty)
             existing.quantity += qty
             existing.margin_usdt = total_margin
-            existing.leverage = max(existing.leverage, leverage)
+            existing.leverage = round(
+                (existing.quantity * existing.entry_price) / total_margin, 4
+            )
             fp = existing
         else:
             fp = FuturesPosition(
@@ -551,8 +574,14 @@ class SimAdapter:
         keep_margin: bool = True,
         close_all: bool = False,
     ):
-        """Close qty (or all) of a futures position. Returns the amount of USDT
-        that lands in the futures wallet, or None if there is nothing to close.
+        """Close qty (or all) of a futures position. Returns
+        ``(wallet_add, fee)`` — the USDT that lands in the futures wallet and
+        the taker fee charged — or ``(None, 0.0)`` if there is nothing to
+        close.
+
+        The taker fee is charged on the *closed notional* (``qty * price``),
+        mirroring Binance USDⓈ-M, never as a percentage of PnL — charging on
+        PnL would shrink a losing trade's loss and understate a winner's cost.
 
         Deleverage semantics (keep_margin=True): a partial close keeps the
         released margin on the remainder so the liquidation price actually
@@ -565,14 +594,15 @@ class SimAdapter:
             if fp.symbol == symbol:
                 target = fp.quantity if close_all else min(qty or fp.quantity, fp.quantity)
                 if target <= 0:
-                    return None
+                    return None, 0.0
                 qty_before = fp.quantity
                 closed = target
                 if fp.side == PositionSide.LONG:
                     pnl = (price - fp.entry_price) * closed
                 else:
                     pnl = (fp.entry_price - price) * closed
-                pnl_net = pnl * (1.0 - fee_rate)
+                fee = closed * price * fee_rate
+                pnl_net = pnl - fee
                 self._state.realized_pnl_usdt += pnl_net
                 if closed >= qty_before - 1e-12:
                     wallet_add = fp.margin_usdt + pnl_net
@@ -586,8 +616,8 @@ class SimAdapter:
                     fp.quantity = qty_before - closed
                     fp.margin_usdt = margin_before * (fp.quantity / qty_before)
                     wallet_add = pnl_net + (margin_before - fp.margin_usdt)
-                return wallet_add
-        return None
+                return wallet_add, fee
+        return None, 0.0
 
     def set_tp_sl(self, symbol: str, take_profit: float = 0.0, stop_loss: float = 0.0) -> bool:
         """Arm (or clear with 0) TP/SL prices on a position."""
