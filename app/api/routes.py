@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -64,6 +64,12 @@ class GuardrailsIn(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReturnFundsIn(BaseModel):
+    scope: str = "wallet"       # "wallet" = free futures balance -> spot
+                                # "position" = excess margin on an open position
+    symbol: Optional[str] = None
+
+
 def build_router(orch: Orchestrator) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -106,6 +112,19 @@ def build_router(orch: Orchestrator) -> APIRouter:
     @router.post("/trade/close")
     async def close_position(body: CloseIn) -> dict[str, Any]:
         resp = await orch.queue_close(body.symbol, close_all=body.close_all, notional_usdt=body.notional_usdt)
+        return resp.to_dict()
+
+    # ---------------------------------------------------------- funds return
+    @router.post("/return")
+    async def return_funds(body: ReturnFundsIn) -> dict[str, Any]:
+        """Move money out of the futures side back to spot: either the free
+        futures-wallet balance, or the excess margin on one open position."""
+        if body.scope == "position":
+            if not body.symbol:
+                raise HTTPException(status_code=400, detail="symbol is required for scope='position'")
+            resp = await orch.release_margin_to_spot(body.symbol)
+        else:
+            resp = await orch.return_futures_wallet_to_spot()
         return resp.to_dict()
 
     # -------------------------------------------------------------- market

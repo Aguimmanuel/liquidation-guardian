@@ -24,7 +24,6 @@ from app.adapters.base import ExecutionAdapter
 from app.agent.guardrails import (
     GuardrailConfig,
     check_cash_sufficient,
-    check_daily_trade_count,
     check_futures_position_exists,
     check_max_trade_size,
     check_min_trade_value,
@@ -42,12 +41,12 @@ from app.agent.narration import (
 )
 from app.agent.risk import (
     portfolio_risk_summary,
+    releasable_margin,
     required_cut,
     required_margin,
 )
 from app.config import (
     EDITABLE_RAIL_KEYS,
-    LOOSEN_DIRECTION,
     RAIL_BOUNDS,
     AppConfig,
 )
@@ -64,6 +63,7 @@ from app.models import (
     ProposalStatus,
     Side,
     TradeProposal,
+    TransferKind,
     utcnow,
 )
 
@@ -126,60 +126,48 @@ class Orchestrator:
         # per-symbol last-known risk zone (OK / WATCH / DANGER) so the always-on
         # monitor can log every zone change instead of only reacting to DANGER.
         self._monitor_zone: dict[str, str] = {}
-        self._load_guardrail_lock()
+        self._load_guardrail_profile()
 
-    # --------------------------------------------- guardrail lock persistence
-    def _lock_path(self):
+    # ------------------------------------------- guardrail profile persistence
+    def _profile_path(self):
         from pathlib import Path
 
-        root = getattr(self.config, "state_file", "data/sim_state.json")
         base = getattr(self.config, "guardrail_state_file", "data/guardrail_state.json")
-        # keep it relative to the same folder as the sim state (repo root at runtime)
         path = Path(base)
         if not path.is_absolute():
             path = Path.cwd() / base
         return path
 
-    def _save_guardrail_lock(self) -> None:
-        """Persist the editable profile + commitment lock.
+    def _save_guardrail_profile(self) -> None:
+        """Persist the editable risk profile.
 
-        The whole point of the lock is that it survives a restart, so this file
-        stores both the lock state and the values the profile was set to. The
-        profile values are persisted too, so an edited profile is a commitment
-        that does not silently reset on reboot. Best-effort: persistence must
-        never break the agent.
+        An edited profile is a choice the user made, so it must survive a
+        restart instead of silently resetting to defaults. Best-effort:
+        persistence must never break the agent.
         """
         g = self.guardrails
         try:
             payload = {
-                "daily_trades_locked": bool(g.daily_trades_locked),
-                "daily_lock_at": g.daily_lock_at.isoformat()
-                if g.daily_lock_at
-                else None,
                 "values": {k: getattr(g, k) for k in EDITABLE_RAIL_KEYS},
                 "symbol_allowlist": list(g.symbol_allowlist),
             }
-            path = self._lock_path()
+            path = self._profile_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload))
         except Exception:
             pass  # persistence is best-effort; never break the agent for it
 
-    def _load_guardrail_lock(self) -> None:
-        """Apply a persisted profile (values + optional lock) at startup.
-
-        The saved values override env defaults — an edited profile is a
-        commitment the user chose, so it must not silently reset on reboot.
-        A lock that already finished its 24h window is released, but its
-        values are kept and re-persisted without the lock.
+    def _load_guardrail_profile(self) -> None:
+        """Apply a persisted profile (values) at startup, overriding env
+        defaults. Older files that also carried the retired 24h lock fields
+        are read back-compatibly — the lock keys are simply ignored.
         """
         g = self.guardrails
         try:
-            path = self._lock_path()
+            path = self._profile_path()
             if not path.exists():
                 return
             payload = json.loads(path.read_text())
-            # back-compat: files written before the profile persisted values
             if isinstance(payload.get("values"), dict):
                 for k in EDITABLE_RAIL_KEYS:
                     if k not in payload["values"]:
@@ -189,8 +177,6 @@ class Orchestrator:
                     try:
                         vf = float(v)
                         if math.isfinite(vf) and lo <= vf <= hi:
-                            if k == "max_daily_trades":
-                                vf = round(vf)
                             setattr(g, k, vf)
                     except (TypeError, ValueError):
                         continue
@@ -199,16 +185,6 @@ class Orchestrator:
                 g.symbol_allowlist = [
                     str(s).strip().upper() for s in allow if str(s).strip()
                 ]
-            if payload.get("daily_trades_locked") and payload.get("daily_lock_at"):
-                at = datetime.fromisoformat(payload["daily_lock_at"])
-                # a lock that already ran its 24h no longer applies
-                if (datetime.now(timezone.utc) - at).total_seconds() < 86400:
-                    g.daily_trades_locked = True
-                    g.daily_lock_at = at
-                else:
-                    g.daily_trades_locked = False
-                    g.daily_lock_at = None
-                    self._save_guardrail_lock()
         except Exception:
             pass
 
@@ -250,11 +226,19 @@ class Orchestrator:
             self.guardrails.liq_warn_pct,
             self.guardrails.liq_danger_pct,
         )
+        # enrich each open position with how much of its margin could be safely
+        # returned to spot right now (None = nothing releaseable / not allowed)
+        rel_by_symbol = {
+            p.symbol: self._releasable_margin(p) for p in state.futures_positions
+        }
+        account = state.to_dict()
+        for pd in account["futures_positions"]:
+            pd["releasable_margin_usdt"] = rel_by_symbol.get(pd["symbol"])
         return {
             "mode": self.config.mode,
             "config": self.config.to_dict(),
             "guardrails": self.guardrails.to_dict(),
-            "account": state.to_dict(),
+            "account": account,
             "proposals": pending,
             "conditions": [c.to_dict() for c in self.conditions.values()],
             "watch_symbols": self.watch_symbols(),
@@ -352,8 +336,7 @@ class Orchestrator:
             else 0.0
         )
         lines.append(
-            f"  Total: ${state.total_value_usdt:,.2f} · drawdown {drawdown:.1f}% · "
-            f"trades today {state.trade_count_today}/{self.guardrails.max_daily_trades}"
+            f"  Total: ${state.total_value_usdt:,.2f} · drawdown {drawdown:.1f}%"
         )
         if state.futures_positions:
             lines.append("  Open positions:")
@@ -481,8 +464,8 @@ class Orchestrator:
         mode returns immediately; the chat-driven "protect my positions" path
         stays for humans who want to trigger the same scan themselves.
 
-        Retries are throttled per symbol so a blocked attempt (e.g. daily cap or
-        no cash) can never spam the audit trail every sweep.
+        Retries are throttled per symbol so a blocked attempt (e.g. no cash)
+        can never spam the audit trail every sweep.
         """
         if not self._auto_active():
             return []
@@ -714,7 +697,6 @@ class Orchestrator:
             check_futures_position_exists(True, prop.symbol),
             check_symbol_allowed(prop.symbol, self.guardrails),
             check_min_trade_value(prop.est_value_usdt, self.guardrails),
-            check_daily_trade_count(state.trade_count_today, self.guardrails),
         ):
             if not result.ok:
                 reasons.append(result.reason)
@@ -900,7 +882,19 @@ class Orchestrator:
             elif prop.kind == ProposalKind.CLOSE:
                 summary = f"Closed {result.symbol} ≈ ${result.executed_value_usdt:,.2f} @ {result.executed_price:,.2f}"
             elif prop.kind == ProposalKind.TRANSFER:
-                summary = f"Added ${result.executed_value_usdt:,.2f} margin to {result.symbol}"
+                tkind = prop.transfer_kind or TransferKind.ADD_MARGIN
+                if tkind == TransferKind.RETURN_WALLET:
+                    summary = (
+                        f"Moved ${result.executed_value_usdt:,.2f} of free futures "
+                        f"balance back to spot cash"
+                    )
+                elif tkind == TransferKind.RELEASE_MARGIN:
+                    summary = (
+                        f"Released ${result.executed_value_usdt:,.2f} excess margin "
+                        f"on {result.symbol} back to spot cash"
+                    )
+                else:
+                    summary = f"Added ${result.executed_value_usdt:,.2f} margin to {result.symbol}"
             elif prop.kind == ProposalKind.TRADE and prop.side == Side.SELL:
                 summary = f"Reduced {result.symbol}: sold {result.executed_value_usdt / result.executed_price:,.6f} ≈ ${result.executed_value_usdt:,.2f}"
             if summary is not None:
@@ -1233,10 +1227,6 @@ class Orchestrator:
             state.cash_usdt >= margin_usdt,
             f"not enough cash: need ${margin_usdt:,.0f}, have ${state.cash_usdt:,.0f}",
         )
-        _note(
-            check_daily_trade_count(state.trade_count_today, self.guardrails).ok,
-            f"daily trade budget used ({state.trade_count_today}/{self.guardrails.max_daily_trades})",
-        )
         side_enum = Side.BUY if side.upper() == "LONG" else Side.SELL
         existing = next(
             (x for x in state.futures_positions if x.symbol == symbol), None
@@ -1348,19 +1338,8 @@ class Orchestrator:
                 else f"Close {qty:,.6f} {symbol.replace('USDT', '')} ≈ ${qty * mark:,.2f}"
             ),
         )
-        # closing reduces risk — exempt from the size cap but respects budget
-        reasons = []
-        if not check_daily_trade_count(state.trade_count_today, self.guardrails).ok:
-            reasons.append(
-                f"daily trade budget used ({state.trade_count_today}/{self.guardrails.max_daily_trades})"
-            )
-        if reasons:
-            self.log(AuditLevel.GUARDRAIL, "close_blocked", "; ".join(reasons), prop.id)
-            return AgentResponse(
-                message="⛔ Close blocked: " + " ".join(reasons),
-                intent="close",
-                state=self.snapshot(),
-            )
+        # closing reduces risk — never calendar-capped: the guardian must be
+        # able to protect (or let the human exit) at any time.
         self.proposals[prop.id] = prop
         self.log(
             AuditLevel.INFO,
@@ -1384,6 +1363,183 @@ class Orchestrator:
         return AgentResponse(
             message=f"📝 {prop.reason} at ≈${mark:,.2f}. Approve to execute.",
             intent="close",
+            state=self.snapshot(),
+            proposals=[prop.to_dict()],
+        )
+
+    # ------------------------------------------------- funds (futures -> spot)
+    def _releasable_margin(self, pos: FuturesPosition) -> Optional[float]:
+        """USDT that can be safely pulled off an open position right now and
+        moved back to spot, or None when nothing can be released.
+
+        Releasing is only offered while the position keeps at least the
+        configured de-risk headroom and stays within the leverage cap (see
+        ``risk.releasable_margin``), and only if the de-risk target is above
+        the watch zone (otherwise "releasing to target" could itself leave the
+        position in a warning state).
+        """
+        target = self.guardrails.liq_target_dist_pct
+        if target <= self.guardrails.liq_warn_pct:
+            return None
+        mark = pos.mark_price or pos.entry_price
+        if pos.quantity <= 0 or pos.margin_usdt <= 0 or mark <= 0:
+            return None
+        rel = releasable_margin(pos, mark, target, self.guardrails.max_leverage)
+        if rel < self.guardrails.min_trade_value_usdt - 1e-9:
+            return None
+        return round(rel, 2)
+
+    async def return_futures_wallet_to_spot(self) -> AgentResponse:
+        """Move the entire free futures-wallet balance back to spot cash.
+
+        Free balance in the futures wallet is not allocated to any isolated
+        position's margin, so returning it never weakens protection — it just
+        puts idle USDT back where it is visible and usable.
+        """
+        await self.refresh()
+        state = self.account()
+        amount = round(state.futures_wallet_usdt, 2)
+        floor = self.guardrails.min_trade_value_usdt
+        if amount < floor - 1e-6:
+            return AgentResponse(
+                message=(
+                    f"Nothing to return — free futures balance is ${amount:,.2f} "
+                    f"(below the ${floor:,.0f} minimum action value)."
+                ),
+                intent="return",
+                state=self.snapshot(),
+            )
+        prop = TradeProposal(
+            id=uuid.uuid4().hex[:10],
+            symbol="USDT",
+            side=Side.BUY,
+            kind=ProposalKind.TRANSFER,
+            transfer_kind=TransferKind.RETURN_WALLET,
+            est_value_usdt=amount,
+            est_quantity=0.0,
+            est_price=0.0,
+            reason=(
+                f"Move the free futures-wallet balance of ${amount:,.2f} back to "
+                "spot cash. This is idle money — no open position is using it — "
+                "so returning it changes nothing about liquidation protection."
+            ),
+        )
+        self.proposals[prop.id] = prop
+        self.log(
+            AuditLevel.INFO,
+            "return_proposed",
+            f"futures wallet ${amount:,.2f} -> spot",
+            prop.id,
+        )
+        if self._auto_active():
+            self.log(
+                AuditLevel.ACTION,
+                "auto_mode",
+                "automatic mode returned the futures wallet to spot",
+                prop.id,
+            )
+            resp = self.decide(prop.id, True)
+            return AgentResponse(
+                message="⚡ " + resp.message + " (automatic mode)",
+                intent="return",
+                state=self.snapshot(),
+            )
+        return AgentResponse(
+            message=(
+                f"📝 Move ${amount:,.2f} of free futures balance back to spot cash? "
+                "Approve to execute."
+            ),
+            intent="return",
+            state=self.snapshot(),
+            proposals=[prop.to_dict()],
+        )
+
+    async def release_margin_to_spot(self, symbol: str) -> AgentResponse:
+        """Pull the excess margin off an open position back to spot.
+
+        Bounded so the position keeps at least the configured de-risk headroom
+        and never exceeds the leverage cap — releasing can only ever leave the
+        position back at its normal protected state, never in danger.
+        """
+        symbol = symbol.upper()
+        await self.refresh()
+        state = self.account()
+        pos = next(
+            (p for p in state.futures_positions if p.symbol == symbol), None
+        )
+        if pos is None:
+            return AgentResponse(
+                message=f"No open {symbol} position to release margin from.",
+                intent="return",
+                state=self.snapshot(),
+            )
+        target = self.guardrails.liq_target_dist_pct
+        if target <= self.guardrails.liq_warn_pct:
+            return AgentResponse(
+                message=(
+                    f"Release suspended: the de-risk target ({target * 100:.0f}%) "
+                    f"must stay above the watch zone "
+                    f"({self.guardrails.liq_warn_pct * 100:.0f}%) so releasing margin "
+                    f"can never push {symbol} into a warning state."
+                ),
+                intent="return",
+                state=self.snapshot(),
+            )
+        amount = self._releasable_margin(pos)
+        if amount is None:
+            return AgentResponse(
+                message=(
+                    f"{symbol} currently holds no excess margin to release — its "
+                    "margin is exactly what keeps it at the de-risk headroom right now."
+                ),
+                intent="return",
+                state=self.snapshot(),
+            )
+        base = symbol.replace("USDT", "")
+        mark = pos.mark_price or pos.entry_price
+        prop = TradeProposal(
+            id=uuid.uuid4().hex[:10],
+            symbol=symbol,
+            side=Side.BUY,
+            kind=ProposalKind.TRANSFER,
+            transfer_kind=TransferKind.RELEASE_MARGIN,
+            est_value_usdt=amount,
+            est_quantity=0.0,
+            est_price=mark,
+            reason=(
+                f"{pos.side.value} {symbol} sits {pos.distance_pct * 100:.1f}% from "
+                f"liquidation with ${pos.margin_usdt:,.2f} margin. The margin above "
+                f"what keeps {target * 100:.0f}% headroom (within the leverage cap) "
+                f"is idle insurance — release ${amount:,.2f} back to spot and the "
+                f"position keeps ≥ {target * 100:.0f}% headroom."
+            ),
+        )
+        self.proposals[prop.id] = prop
+        self.log(
+            AuditLevel.INFO,
+            "release_proposed",
+            f"{symbol} margin ${amount:,.2f} -> spot",
+            prop.id,
+        )
+        if self._auto_active():
+            self.log(
+                AuditLevel.ACTION,
+                "auto_mode",
+                f"automatic mode released {symbol} excess margin to spot",
+                prop.id,
+            )
+            resp = self.decide(prop.id, True)
+            return AgentResponse(
+                message="⚡ " + resp.message + " (automatic mode)",
+                intent="return",
+                state=self.snapshot(),
+            )
+        return AgentResponse(
+            message=(
+                f"📝 Release ${amount:,.2f} excess margin on {symbol} back to spot "
+                f"(keeps ≥ {target * 100:.0f}% liquidation headroom)? Approve to execute."
+            ),
+            intent="return",
             state=self.snapshot(),
             proposals=[prop.to_dict()],
         )
@@ -1426,7 +1582,8 @@ class Orchestrator:
         Arming a take-profit or stop-loss is *pre-authorization* to exit, so
         when a level is crossed the position is closed right away in the
         simulator — no extra approval round-trip, exactly like an exchange-side
-        stop order. Protective exits are exempt from the daily-trade budget.
+        stop order. Protective exits are never calendar-capped — the guardian
+        must always be allowed to exit.
         """
         await self.refresh()
         state = self.account()
@@ -1517,33 +1674,8 @@ class Orchestrator:
 
     # ------------------------------------------------------ guardrail editing
     def guardrail_status(self, state: Optional[AccountState] = None) -> dict:
-        """Current editable guardrails + 24h budget info."""
+        """Current editable guardrail profile."""
         g = self.guardrails
-        if state is None:
-            state = self.account()
-        # auto-expire a stale 24h lock whenever the status is read; the
-        # profile values persist — only the lock releases.
-        if g.daily_trades_locked and g.daily_lock_at:
-            if (datetime.now(timezone.utc) - g.daily_lock_at).total_seconds() >= 86400:
-                g.daily_trades_locked = False
-                g.daily_lock_at = None
-                self._save_guardrail_lock()
-        window_start = state.daily_window_start
-        remaining = 0.0
-        if window_start:
-            remaining = max(
-                0.0,
-                86400.0 - (datetime.now(timezone.utc) - window_start).total_seconds(),
-            )
-        lock_remaining = 0
-        if g.daily_trades_locked and g.daily_lock_at:
-            lock_remaining = max(
-                0,
-                int(
-                    86400
-                    - (datetime.now(timezone.utc) - g.daily_lock_at).total_seconds()
-                ),
-            )
         return {
             "values": {
                 "liq_warn_pct": g.liq_warn_pct,
@@ -1552,57 +1684,24 @@ class Orchestrator:
                 "max_trade_pct": g.max_trade_pct,
                 "min_trade_value_usdt": g.min_trade_value_usdt,
                 "cooldown_seconds": g.cooldown_seconds,
-                "max_daily_trades": g.max_daily_trades,
                 "max_leverage": g.max_leverage,
-                "symbol_allowlist": g.symbol_allowlist,
             },
-            "locked": g.daily_trades_locked,
-            "lock_until": g.daily_lock_at.isoformat() if g.daily_lock_at else None,
-            "lock_remaining_seconds": lock_remaining,
-            "budget": {
-                "trades_used": state.trade_count_today,
-                "trades_cap": g.max_daily_trades,
-                "window_remaining_seconds": int(remaining),
-                "window_start": window_start.isoformat() if window_start else None,
-            },
+            "symbol_allowlist": list(g.symbol_allowlist),
         }
 
     def update_guardrails(self, updates: dict[str, Any]) -> AgentResponse:
         """Update the runtime-editable risk profile.
 
-        Locking engages a *profile* lock: every editable limit freezes for one
-        24-hour window. While locked:
-          - loosening any limit is refused — that is the commitment,
-          - tightening any limit is still allowed (risk-reducing is always
-            safe),
-          - there is no early unlock, by design.
-        The whole profile (values + lock) persists across restarts; a finished
-        lock releases itself automatically.
+        Every numeric limit is sanity-bounded (RAIL_BOUNDS) so the agent can
+        never be driven into a nonsense value, and edits persist across
+        restarts. There is deliberately no per-day trade budget here: the
+        guardian only ever protects, so its actions must never be capped by a
+        calendar window.
         """
         g = self.guardrails
-        gstate = self.guardrail_status()
         changed: list[str] = []
         refused: list[str] = []
 
-        # --- lock engagement / early-unlock requests -----------------------
-        if gstate["locked"] and "daily_trades_locked" in updates:
-            want_lock = bool(updates["daily_trades_locked"])
-            if want_lock:
-                return AgentResponse(
-                    message="🔒 Your risk profile is already locked for this 24-hour window. "
-                    "It releases automatically when the window ends.",
-                    intent="guardrails",
-                    state=self.snapshot(),
-                )
-            return AgentResponse(
-                message="🔒 The risk profile is locked for this 24-hour window and cannot be "
-                "unlocked early — that lock is the whole point. Tightening any limit "
-                "is still allowed; loosening waits until the window ends.",
-                intent="guardrails",
-                state=self.snapshot(),
-            )
-
-        # --- numeric profile limits ----------------------------------------
         for k in EDITABLE_RAIL_KEYS:
             if k not in updates:
                 continue
@@ -1626,26 +1725,13 @@ class Orchestrator:
                         f"{k}: {self._fmt_val(k, val)} must be >= {self._fmt_val(k, lo)}"
                     )
                 continue
-            if k == "max_daily_trades":
-                val = round(val)
             cur = getattr(g, k)
-            if gstate["locked"]:
-                direction = LOOSEN_DIRECTION.get(k, 0)
-                loosens = (direction > 0 and val > cur) or (
-                    direction < 0 and val < cur
-                )
-                if loosens:
-                    refused.append(
-                        f"{k}: {self._fmt_val(k, val)} loosens the locked value of "
-                        f"{self._fmt_val(k, cur)}"
-                    )
-                    continue
             if abs(val - float(cur)) < 1e-12:
                 continue  # no-op edit
             setattr(g, k, val)
             changed.append(f"{k}={self._fmt_val(k, val)}")
 
-        # --- symbol allowlist (hygiene, not a ratcheted risk ceiling) ------
+        # --- symbol allowlist (hygiene list, not a risk ceiling) -----------
         if isinstance(updates.get("symbol_allowlist"), list):
             clean = [
                 str(s).strip().upper()
@@ -1656,26 +1742,15 @@ class Orchestrator:
                 g.symbol_allowlist = clean
                 changed.append("symbol_allowlist=…")
 
-        # --- engage the lock ----------------------------------------------
-        if updates.get("daily_trades_locked") and not gstate["locked"]:
-            g.daily_trades_locked = True
-            g.daily_lock_at = datetime.now(timezone.utc)
-            changed.append("risk profile LOCKED for 24h")
-
         if changed:
-            self._save_guardrail_lock()
+            self._save_guardrail_profile()
             self.log(AuditLevel.ACTION, "guardrails_updated", ", ".join(changed))
 
         parts: list[str] = []
         if changed:
             parts.append("✅ " + ", ".join(changed))
         if refused:
-            parts.append(
-                "🔒 Refused "
-                + str(len(refused))
-                + " edit(s) while locked: "
-                + "; ".join(refused)
-            )
+            parts.append("⛔ Refused " + str(len(refused)) + " edit(s): " + "; ".join(refused))
         return AgentResponse(
             message="\n".join(parts) if parts else "No changes.",
             intent="guardrails",

@@ -127,16 +127,23 @@ assumption:
 
 Every proposal is scored by deterministic checks: symbol allowlist, min trade
 value, max order size (for buys and margin adds — a *reduce* is exempt because
-closing exposure is the safe direction, like sells), daily trade cap,
-cooldown (autonomous actions only), leverage cap on opens, and
-cash/transfer sufficiency. The thresholds are user-editable at runtime
-(`app/agent/orchestrator.py` `update_guardrails`) and persisted to
-`data/guardrail_state.json`, so a profile survives restarts. The whole profile
-can be **locked for the current 24-hour window** as a self-discipline
-tripwire: while locked, loosening *any* limit is refused (a one-way ratchet —
-each limit has a known "loosening direction", see `LOOSEN_DIRECTION` in
-`config.py`), tightening is always allowed, and there is no early unlock; the
-lock auto-releases when the window completes.
+closing exposure is the safe direction, like sells), cooldown (autonomous
+actions only), leverage cap on opens, and cash/transfer sufficiency. The
+thresholds are user-editable at runtime (`app/agent/orchestrator.py`
+`update_guardrails`) and persisted to `data/guardrail_state.json`, so a profile
+survives restarts. There is deliberately **no per-day trade budget** (a legacy
+cap that could freeze de-risking mid-crash was removed); protection actions
+are never calendar-capped.
+
+Money movement is two-way. Transfers are a single proposal kind with a
+`transfer_kind` discriminator: `ADD_MARGIN` (spot → futures, the de-risk
+margin top-up), `RETURN_WALLET` (the free futures-wallet balance → spot), and
+`RELEASE_MARGIN` (excess margin on an open position → spot). The release size
+is bounded by `risk.releasable_margin`, which keeps the position at least at
+its de-risk headroom (`liq_target_dist_pct`) **and** its effective leverage
+under the configured cap — so moving money back out can never recreate the
+liquidation risk the guardian exists to prevent. Releasing is refused outright
+while the de-risk target is set at or below the watch zone.
 
 ## Intent handling
 
@@ -157,13 +164,13 @@ endpoints (`/api/trade/*`, `/api/tpsl`, `/api/guardrails`).
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (53 tests, no network —
+`tests/` covers the risk engine and feature surface (58 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
-distance and risk zones, `required_cut`/`required_margin`, guardrail semantics,
-text parsers, plus feature tests for: dynamic-leverage opens (cap, cash,
-opposite-side blocks, same-side averaging), TP/SL arming and automatic exits on
-both sides, the 24-hour trade window rollover, the profile commitment lock
-(loosening refused / tightening allowed, early unlock refused, expiry,
-persistence across restart), and the proactive auto-protect scan (manual-mode
-no-op, autonomous de-risk without a prompt, retry throttling, guardrails
-respected).
+distance and risk zones, `required_cut`/`required_margin`, `margin_for_target`/
+`releasable_margin`, guardrail semantics, text parsers, plus feature tests
+for: dynamic-leverage opens (cap, cash, opposite-side blocks, same-side
+averaging), TP/SL arming and automatic exits on both sides, the always-on
+monitor (zone-change narration, manual escalation queue, autonomous auto de-risk,
+retry throttling, guardrails respected even while a de-risk is blocked), the
+funds round trip (futures-wallet → spot and bounded per-position margin
+release), and the deliberate absence of any per-day trade budget / 24h lock.

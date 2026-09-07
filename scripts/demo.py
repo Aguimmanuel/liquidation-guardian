@@ -3,7 +3,8 @@
 
 Runs the agent loop directly (no HTTP) and prints a clean walkthrough.
 Mirrors exactly what the web UI does: guardrailed open with dynamic
-leverage, TP/SL arming, the de-risk flow, and the daily-budget lock.
+leverage, TP/SL arming, the de-risk flow, and two-way fund movement
+(futures -> spot — nothing is ever trapped).
 
 Usage:
     python scripts/demo.py
@@ -157,11 +158,15 @@ async def main() -> None:
     r = await orch.handle_message("risk report")
     print(r.message)
 
-    step("8. Daily discipline — lock the trade budget for 24h")
-    r = orch.update_guardrails({"max_daily_trades": 3, "daily_trades_locked": True})
+    step("8. Money flows back to spot — nothing is trapped")
+    r = await orch.return_futures_wallet_to_spot()
     print("  " + r.message)
-    r = orch.update_guardrails({"max_daily_trades": 99})
-    print("  (trying to raise the cap…) " + r.message)
+    for p in r.proposals:
+        resp = orch.decide(p["id"], True)
+        print("  " + resp.message.split("\\n")[0])
+    for pos in orch.account().futures_positions:
+        r2 = await orch.release_margin_to_spot(pos.symbol)
+        print("  " + r2.message)
 
     step("9. Audit trail (transparency)")
     for a in orch.snapshot()["audit"][-10:]:

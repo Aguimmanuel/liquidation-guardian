@@ -69,7 +69,7 @@ def narrate_de_risk(danger_positions: list[Any], pending: list[Any]) -> str:
     if not pending:
         return (
             "🚨 Positions in danger, but every de-risk option was blocked by a guardrail. "
-            "See the audit trail for reasons (likely daily trade cap or insufficient cash)."
+            "See the audit trail for reasons (e.g. the coin is off the approved list or cash is insufficient)."
         )
     lines = ["🛡️ De-risk plan — review and approve:"]
     for p in pending:

@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from app.agent.guardrails import (
     check_cash_sufficient,
     check_cooldown,
-    check_daily_trade_count,
     check_drawdown,
     check_max_trade_size,
     check_min_trade_value,
@@ -24,7 +23,7 @@ def cfg(**kw) -> GuardrailConfig:
     return base
 
 
-def state(total=10_000.0, cash=1_000.0, peak=None, trades=0, last=None) -> AccountState:
+def state(total=10_000.0, cash=1_000.0, peak=None, last=None) -> AccountState:
     return AccountState(
         total_value_usdt=total,
         cash_usdt=cash,
@@ -36,7 +35,6 @@ def state(total=10_000.0, cash=1_000.0, peak=None, trades=0, last=None) -> Accou
         ],
         peak_value_usdt=peak or total,
         realized_pnl_usdt=0.0,
-        trade_count_today=trades,
         last_trade_at=last,
         updated_at=datetime.now(timezone.utc),
     )
@@ -89,10 +87,11 @@ def test_cooldown():
     assert not check_cooldown(now - timedelta(seconds=60), now, g).ok
 
 
-def test_daily_trade_cap():
-    g = cfg(max_daily_trades=10)
-    assert check_daily_trade_count(9, g).ok
-    assert not check_daily_trade_count(10, g).ok
+def test_no_daily_cap_guardrail_exists():
+    """The per-day trade budget was removed: a calendar cap must never freeze
+    protective actions. GuardrailConfig should not even carry the knob."""
+    g = cfg()
+    assert not hasattr(g, "max_daily_trades")
 
 
 def test_cash_sufficient():
@@ -103,10 +102,10 @@ def test_cash_sufficient():
 
 def test_evaluate_proposal_buy_all_checks():
     g = cfg(symbol_allowlist=["BTCUSDT"], max_trade_pct=0.10,
-            max_drawdown_pct=0.15, cooldown_seconds=3600, max_daily_trades=10,
+            max_drawdown_pct=0.15, cooldown_seconds=3600,
             fee_rate=0.001, min_trade_value_usdt=10.0)
     now = datetime.now(timezone.utc)
-    st = state(total=10_000.0, cash=9_000.0, trades=0, last=now - timedelta(hours=2))
+    st = state(total=10_000.0, cash=9_000.0, last=now - timedelta(hours=2))
     allowed, results = evaluate_proposal(prop("BTCUSDT", Side.BUY, 500.0), st, g, now=now)
     assert allowed
     assert all(r.ok for r in results)
@@ -120,10 +119,10 @@ def test_evaluate_proposal_buy_all_checks():
 
 def test_evaluate_proposal_sell_allowed_in_drawdown():
     g = cfg(symbol_allowlist=["BTCUSDT"], max_trade_pct=0.10,
-            max_drawdown_pct=0.15, cooldown_seconds=3600, max_daily_trades=10,
+            max_drawdown_pct=0.15, cooldown_seconds=3600,
             fee_rate=0.001, min_trade_value_usdt=10.0)
     now = datetime.now(timezone.utc)
-    st = state(total=8_000.0, cash=1_000.0, peak=10_000.0, trades=9, last=now - timedelta(seconds=5))
+    st = state(total=8_000.0, cash=1_000.0, peak=10_000.0, last=now - timedelta(seconds=5))
     allowed, _ = evaluate_proposal(prop("BTCUSDT", Side.SELL, 500.0), st, g, now=now)
     assert allowed  # de-risking is always allowed
 
@@ -139,7 +138,7 @@ def test_max_trade_size_epsilon_no_false_block():
 
 def test_evaluate_proposal_cooldown_waivable():
     g = cfg(symbol_allowlist=["BTCUSDT"], max_trade_pct=0.10,
-            max_drawdown_pct=0.15, cooldown_seconds=3600, max_daily_trades=10,
+            max_drawdown_pct=0.15, cooldown_seconds=3600,
             fee_rate=0.001, min_trade_value_usdt=10.0)
     now = datetime.now(timezone.utc)
     st = state(total=10_000.0, cash=9_000.0, last=now - timedelta(seconds=5))

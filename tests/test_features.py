@@ -1,5 +1,7 @@
-"""Feature tests for the item-7 build: dynamic leverage opens, TP/SL auto
-execution, daily-window budget + lock, and guardrail editing.
+"""Feature tests: dynamic leverage opens, TP/SL auto execution, always-on
+guardian monitoring, two-way fund movement (futures -> spot), and guardrail
+editing. The old per-day trade budget + 24h profile lock were removed on
+purpose: a calendar cap must never freeze protective actions.
 
 All tests run fully offline behind a fake market feed.
 """
@@ -124,7 +126,6 @@ def test_open_approve_executes_long(stack):
     assert pos.quantity == pytest.approx(5000.0 / 1000.0)     # notional / entry
     assert pos.margin_usdt == pytest.approx(500.0)
     assert acct.cash_usdt == pytest.approx(9500.0)            # margin taken from spot
-    assert acct.trade_count_today == 1
 
 
 def test_open_dynamic_leverage_matters(stack):
@@ -201,45 +202,83 @@ def test_tp_sl_short_side_logic(stack):
     assert not [p for p in acct.futures_positions if p.symbol == "ETHUSDT"]
 
 
-def test_daily_budget_lock_is_irreversible_until_window(stack):
+def test_funds_wallet_roundtrip_returns_to_spot(stack):
+    """Closing a position parks its margin + PnL in the futures wallet; the
+    wallet can now be moved back to spot (it is idle money, never part of an
+    open position's margin)."""
     orch, market, sim = stack
-    orch.update_guardrails({"max_daily_trades": 2, "daily_trades_locked": True})
-    gs = orch.guardrail_status()
-    assert gs["locked"] is True
-    assert gs["lock_remaining_seconds"] > 0
+    _open_long(orch, margin=500.0, leverage=10.0)          # spot cash 9500, wallet 0
+    assert orch.account().futures_wallet_usdt == pytest.approx(0.0)
+    close = run(orch.queue_close("BTCUSDT", close_all=True))
+    orch.decide(close.proposals[0]["id"], True)
+    acct1 = orch.account()
+    assert not acct1.futures_positions
+    assert acct1.futures_wallet_usdt == pytest.approx(500.0, abs=0.05)
+    ret = run(orch.return_futures_wallet_to_spot())
+    assert ret.proposals and ret.proposals[0]["transfer_kind"] == "RETURN_WALLET"
+    orch.decide(ret.proposals[0]["id"], True)
+    acct2 = orch.account()
+    assert acct2.futures_wallet_usdt == pytest.approx(0.0)
+    assert acct2.cash_usdt == pytest.approx(10000.0, abs=0.05)
+    assert any(a.event == "return_proposed" for a in orch.audit)
 
-    # cannot raise the cap while locked (loosening refused)
-    blocked = orch.update_guardrails({"max_daily_trades": 99})
-    assert "locked" in blocked.message.lower()
-    assert orch.guardrails.max_daily_trades == 2
-    # cannot unlock early
-    blocked2 = orch.update_guardrails({"daily_trades_locked": False})
-    assert "locked" in blocked2.message.lower()
-    assert orch.guardrails.max_daily_trades == 2
-    assert orch.guardrail_status()["locked"] is True
 
-    # a tightening edit is still allowed while locked (one-way ratchet):
-    # raising the watch zone (earlier warning) is risk-reducing, so it passes
-    ok = orch.update_guardrails({"liq_warn_pct": 0.14})
-    assert orch.guardrails.liq_warn_pct == pytest.approx(0.14)
-    assert orch.guardrail_status()["locked"] is True  # still locked
+def test_release_excess_margin_back_to_spot(stack):
+    """Margin added by a de-risk can be pulled back off an open position once
+    it is no longer needed, bounded so the position keeps its de-risk
+    headroom and stays in the OK zone."""
+    from app.models import TransferKind
 
-    # a 24h-old lock auto-expires on the next status read
-    assert orch.guardrails.daily_lock_at is not None
-    orch.guardrails.daily_lock_at = utcnow() - timedelta(hours=25)
-    assert orch.guardrail_status()["locked"] is False
-    changed = orch.update_guardrails({"max_daily_trades": 7})
-    assert orch.guardrails.max_daily_trades == 7
-    assert changed.message.startswith("✅")
+    orch, market, sim = stack
+    b = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))
+    orch.decide(b.proposals[0]["id"], True)                # WATCH ~9.5% from liq
+    # drive the price down so the position lands in DANGER -> monitor queues
+    # the two-option de-risk plan (reduce OR add margin)
+    market.prices["BTCUSDT"] = 920.0
+    run(orch.monitor_positions())
+    add = [p for p in orch.proposals.values() if p.status.value == "PENDING"
+           and p.kind.value == "TRANSFER"]
+    assert add, "DANGER must queue an add-margin (Option B) transfer"
+    orch.decide(add[0].id, True)                           # top margin up to headroom
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.risk.value == "OK"
+    margin_after_topup = pos.margin_usdt                   # capture as a float
+    # price recovers -> that margin is now excess and should be releaseable
+    market.prices["BTCUSDT"] = 1000.0
+    run(orch.refresh())
+    snap = orch.snapshot()
+    shown = next(p for p in snap["account"]["futures_positions"] if p["symbol"] == "BTCUSDT")
+    assert shown["releasable_margin_usdt"] is not None and shown["releasable_margin_usdt"] > 100.0
 
-    # a fresh 24h window rolls the daily counter back to zero
-    _open_long(orch)
-    assert orch.account().trade_count_today == 1
-    sim._load()
-    assert sim._state is not None
-    sim._state.daily_window_start = utcnow() - timedelta(hours=25)
-    sim._save()
-    assert orch.account().trade_count_today == 0
+    cash_before = snap["account"]["cash_usdt"]
+    ret = run(orch.release_margin_to_spot("BTCUSDT"))
+    assert ret.proposals and ret.proposals[0]["transfer_kind"] == TransferKind.RELEASE_MARGIN.value
+    released = ret.proposals[0]["est_value_usdt"]
+    orch.decide(ret.proposals[0]["id"], True)
+    acct2 = orch.account()
+    pos2 = next(p for p in acct2.futures_positions if p.symbol == "BTCUSDT")
+    assert acct2.cash_usdt == pytest.approx(cash_before + released, abs=0.05)
+    assert acct2.futures_wallet_usdt == pytest.approx(0.0)
+    assert pos2.risk.value == "OK"                          # still protected
+    assert pos2.margin_usdt < margin_after_topup            # some margin came home
+    assert any(a.event == "release_proposed" for a in orch.audit)
+
+
+def test_release_refused_when_nothing_excess_and_target_misconfigured(stack):
+    """Release is bounded: nothing to release when the position still needs
+    margin, and the action is refused entirely if the de-risk target is not
+    above the watch zone (it could otherwise push a position into warning)."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0)           # WATCH: needs MORE margin
+    ret = run(orch.release_margin_to_spot("BTCUSDT"))
+    assert not ret.proposals
+    assert "no excess margin" in ret.message.lower()
+    # a nonsense config (target <= watch zone) must suspend releases outright
+    _open_long(orch, symbol="ETHUSDT", margin=500.0, leverage=10.0)
+    orch.update_guardrails({"liq_target_dist_pct": 0.08})   # below watch 0.10
+    ret2 = run(orch.release_margin_to_spot("ETHUSDT"))
+    assert not ret2.proposals
+    assert "de-risk target" in ret2.message
 
 
 def test_guardrail_edits_surface_in_snapshot(stack):
@@ -327,81 +366,32 @@ def test_auto_mode_executes_de_risk_on_danger(stack):
     assert healed.risk.value != "DANGER" or healed.quantity < pos.quantity
 
 
-def test_guardrail_lock_persists_across_restart(stack, tmp_path):
+def test_daily_budget_and_24h_lock_are_gone(stack):
+    """The per-day trade budget and the 24h profile lock were removed: a
+    calendar cap must never freeze protective actions, and stale lock requests
+    are inert."""
     orch, market, sim = stack
-    cfg = orch.config
-    # lock it
-    orch.update_guardrails({"max_daily_trades": 3, "daily_trades_locked": True})
-    lock_at = orch.guardrails.daily_lock_at
-    assert lock_at is not None
-    # a "restart": fresh guardrails + fresh orchestrator over the same files
-    from app.agent.orchestrator import Orchestrator
-    from app.config import GuardrailConfig
-
-    g2 = GuardrailConfig()
-    orch2 = Orchestrator(cfg, g2, sim, market)
-    assert g2.daily_trades_locked is True, "lock must survive a restart"
-    assert g2.daily_lock_at == lock_at
-    gs2 = orch2.guardrail_status()
-    assert gs2["locked"] is True
-    # cannot unlock even after restart
-    msg = orch2.update_guardrails({"daily_trades_locked": False})
-    assert "cannot be unlocked early" in msg.message
-    # once expired it clears and editing returns
-    g2.daily_lock_at = utcnow() - timedelta(hours=25)
-    assert orch2.guardrail_status()["locked"] is False
-    ok = orch2.update_guardrails({"max_daily_trades": 9})
-    assert g2.max_daily_trades == 9
+    assert not hasattr(orch.guardrails, "max_daily_trades")
+    assert not hasattr(orch.guardrails, "daily_trades_locked")
+    gs = orch.guardrail_status()
+    for stale in ("budget", "locked", "lock_until", "lock_remaining_seconds"):
+        assert stale not in gs, stale
+    assert "max_daily_trades" not in gs["values"]
+    # stale requests (cap / lock) are inert, never fatal, never engage anything
+    resp = orch.update_guardrails({"max_daily_trades": 3, "daily_trades_locked": True})
+    assert "No changes" in resp.message
+    assert not any(a.event == "guardrails_updated" for a in orch.audit)
+    # and a DANGER position still gets protected: no cap, no gate in the way
+    _open_danger_long(orch)
+    orch.set_agent_mode("auto", consent=True)
+    responses = run(orch.monitor_positions())
+    assert responses, "guardian must still de-risk without any daily budget"
+    healed = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert healed.risk.value != "DANGER"
 
 
-# ---------------------------------------------------------------------------
-# Profile commitment lock (one-way ratchet) + proactive auto guardian
-# ---------------------------------------------------------------------------
-
-
-def _lock_profile(orch):
-    resp = orch.update_guardrails({"daily_trades_locked": True})
-    assert orch.guardrail_status()["locked"] is True, resp.message
-    return resp
-
-
-def test_locked_profile_refuses_loosening_but_allows_tightening(stack):
-    """While the profile is locked, loosening any risk limit is refused but
-    tightening (risk-reducing) every limit is still allowed."""
+def test_guardrail_edits_reject_out_of_bounds(stack):
     orch, market, sim = stack
-    g = orch.guardrails
-    _lock_profile(orch)
-
-    # (value that loosens, value that tightens) per ratcheted key
-    loosening_and_tightening = {
-        "max_daily_trades": (20, 3),
-        "max_leverage": (100.0, 20.0),
-        "max_trade_pct": (0.20, 0.05),
-        "cooldown_seconds": (60.0, 7200.0),
-        "liq_warn_pct": (0.05, 0.15),
-        "liq_danger_pct": (0.03, 0.12),
-        "liq_target_dist_pct": (0.05, 0.25),
-    }
-    for key, (loose, tight) in loosening_and_tightening.items():
-        current = getattr(g, key)
-        blocked = orch.update_guardrails({key: loose})
-        assert "locked" in blocked.message.lower(), (key, blocked.message)
-        assert getattr(g, key) == current, key  # value must not move
-        ok = orch.update_guardrails({key: tight})
-        assert getattr(g, key) == pytest.approx(tight), (key, ok.message)
-        assert orch.guardrail_status()["locked"] is True, key  # still locked
-
-    # min trade value is a dust filter, not a risk ceiling: both directions pass
-    orch.update_guardrails({"min_trade_value_usdt": 0.0})
-    assert g.min_trade_value_usdt == 0.0
-    orch.update_guardrails({"min_trade_value_usdt": 25.0})
-    assert g.min_trade_value_usdt == 25.0
-    assert orch.guardrail_status()["locked"] is True
-
-
-def test_locked_profile_rejects_invalid_values(stack):
-    orch, market, sim = stack
-    _lock_profile(orch)
     bad = orch.update_guardrails({"max_leverage": 9999.0})
     assert "must stay within" in bad.message
     assert orch.guardrails.max_leverage == 50.0
@@ -410,7 +400,7 @@ def test_locked_profile_rejects_invalid_values(stack):
 
 
 def test_profile_values_persist_across_restart(stack, tmp_path):
-    """Edits survive a restart even without a lock (env defaults no longer win)."""
+    """Edits survive a restart (env defaults no longer win)."""
     orch, market, sim = stack
     orch.update_guardrails({"liq_danger_pct": 0.05, "max_leverage": 25.0, "cooldown_seconds": 1800.0})
 
@@ -422,7 +412,6 @@ def test_profile_values_persist_across_restart(stack, tmp_path):
     assert g2.liq_danger_pct == pytest.approx(0.05)
     assert g2.max_leverage == pytest.approx(25.0)
     assert g2.cooldown_seconds == pytest.approx(1800.0)
-    assert orch2.guardrail_status()["locked"] is False
 
 
 def _open_danger_long(orch):
@@ -462,33 +451,22 @@ def test_auto_protect_scan_derisks_danger_without_prompt(stack):
     assert healed.risk.value != "DANGER"              # back to safe headroom
 
 
-def test_auto_protect_scan_throttles_repeat_attempts(stack):
-    """A blocked attempt (daily cap reached) must not retry every sweep."""
+def test_auto_protect_throttles_blocked_attempts(stack):
+    """A de-risk blocked by guardrails (e.g. symbol off the allowlist) must not
+    retry every sweep — the guardian never skips guardrails, and never spams."""
     orch, market, sim = stack
-    orch.update_guardrails({"max_daily_trades": 1})  # cap consumed by the open below
-    _open_danger_long(orch)                           # trade_count_today becomes 1
-    assert orch.account().trade_count_today == 1
+    _open_danger_long(orch)
+    orch.update_guardrails({"symbol_allowlist": ["ETHUSDT"]})  # BTC de-risk now blocked
     orch.set_agent_mode("auto", consent=True)
-
-    run(orch.auto_protect_scan())                     # blocked: reduce + add-margin both refused
+    run(orch.monitor_positions())
     blocked_first = [a for a in orch.audit if a.event == "de_risk_blocked"]
-    assert blocked_first and all("cap" in a.detail for a in blocked_first)
-    run(orch.auto_protect_scan())                     # immediately again → throttled
+    assert blocked_first, "guardrails must still block an off-list de-risk"
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.quantity == pytest.approx(12000.0 / 1000.0)     # untouched
+    run(orch.monitor_positions())                              # immediately again -> throttled
     blocked_second = [a for a in orch.audit if a.event == "de_risk_blocked"]
     assert len(blocked_second) == len(blocked_first), \
         "second attempt must be throttled, not re-logged"
-
-
-def test_proactive_guardian_respects_lock_out_of_the_box(stack):
-    """Auto-protect never skips the guardrails; a locked budget cap still holds."""
-    orch, market, sim = stack
-    orch.update_guardrails({"max_daily_trades": 1})
-    _open_danger_long(orch)
-    orch.set_agent_mode("auto", consent=True)
-    run(orch.auto_protect_scan())
-    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
-    assert pos.quantity == pytest.approx(12000.0 / 1000.0)  # untouched
-    assert any(a.event == "de_risk_blocked" for a in orch.audit)
 
 
 def test_monitor_positions_queues_de_risk_plan_in_manual_mode(stack):

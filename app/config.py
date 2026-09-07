@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Runtime-editable guardrail profile
@@ -25,28 +24,11 @@ EDITABLE_RAIL_KEYS: tuple[str, ...] = (
     "max_trade_pct",
     "min_trade_value_usdt",
     "cooldown_seconds",
-    "max_daily_trades",
     "max_leverage",
 )
 
-# One-way ratchet: for each editable limit, which direction of change is a
-# *loosening* (blocked while the profile is locked):
-#   +1  -> increasing the value loosens the limit
-#   -1  -> decreasing the value loosens the limit
-#    0  -> not a risk ceiling (either direction allowed while locked)
-LOOSEN_DIRECTION: dict[str, int] = {
-    "max_daily_trades": +1,     # more trades allowed = looser
-    "max_leverage": +1,         # more leverage = looser
-    "max_trade_pct": +1,        # bigger orders = looser
-    "min_trade_value_usdt": 0,  # dust filter — not a risk ceiling
-    "cooldown_seconds": -1,     # shorter gap between auto actions = looser
-    "liq_warn_pct": -1,         # later warning = looser
-    "liq_danger_pct": -1,       # later intervention = looser
-    "liq_target_dist_pct": -1,  # less post-de-risk headroom = looser
-}
-
 # Numeric sanity bounds applied on every guardrail edit (kept in one place so
-# a locked profile can still never be driven into a nonsense value).
+# the profile can never be driven into a nonsense value).
 RAIL_BOUNDS: dict[str, tuple[float, float]] = {
     "liq_warn_pct": (0.0, 1.0),
     "liq_danger_pct": (0.0, 1.0),
@@ -54,7 +36,6 @@ RAIL_BOUNDS: dict[str, tuple[float, float]] = {
     "max_trade_pct": (0.0, 1.0),
     "min_trade_value_usdt": (0.0, float("inf")),
     "cooldown_seconds": (0.0, float("inf")),
-    "max_daily_trades": (1.0, float("inf")),
     "max_leverage": (1.0, 125.0),  # Binance USDⓈ-M hard max
 }
 
@@ -70,7 +51,6 @@ class GuardrailConfig:
     max_trade_pct: float = 0.10  # one order may not exceed 10% of portfolio value
     max_drawdown_pct: float = 0.15  # portfolio drawdown from peak halts new buys
     min_trade_value_usdt: float = 10.0  # ignore dust-sized orders
-    max_daily_trades: int = 10  # hard cap on executions per UTC day
     cooldown_seconds: int = 3600  # minimum gap between autonomous actions
     drift_threshold_pct: float = 0.05  # unused by the guardian (kept for config parity)
     target_cash_pct: float = 0.10  # default cash reserve target
@@ -92,13 +72,6 @@ class GuardrailConfig:
     fee_rate: float = 0.001  # simulated taker fee (0.1%), Binance spot
     # -- runtime-editable guardrail state (set from the UI) --
     max_leverage: float = 50.0  # cap when opening a position (UI enforces <= this)
-    # The commitment lock. When engaged it freezes the entire editable risk
-    # profile (not just the daily cap) for one 24-hour window: loosening any
-    # limit is refused until the window ends, tightening is always allowed,
-    # and there is no early unlock. Persisted (values + lock) in
-    # guardrail_state.json.
-    daily_trades_locked: bool = False
-    daily_lock_at: Optional[datetime] = None
     mcp_url: str = "https://agent.binance.com/mcp/agentic"
     mcp_access_token: str = ""  # optional pre-issued Bearer token
 
@@ -107,7 +80,6 @@ class GuardrailConfig:
             "max_trade_pct": self.max_trade_pct,
             "max_drawdown_pct": self.max_drawdown_pct,
             "min_trade_value_usdt": self.min_trade_value_usdt,
-            "max_daily_trades": self.max_daily_trades,
             "cooldown_seconds": self.cooldown_seconds,
             "drift_threshold_pct": self.drift_threshold_pct,
             "target_cash_pct": self.target_cash_pct,
@@ -118,10 +90,6 @@ class GuardrailConfig:
             "liq_target_dist_pct": self.liq_target_dist_pct,
             "futures_fee_rate": self.futures_fee_rate,
             "max_leverage": self.max_leverage,
-            "daily_trades_locked": self.daily_trades_locked,
-            "daily_lock_at": self.daily_lock_at.isoformat()
-            if self.daily_lock_at
-            else None,
         }
 
 
@@ -228,7 +196,6 @@ def load_guardrails() -> GuardrailConfig:
         max_trade_pct=_env_float("RS_MAX_TRADE_PCT", 0.10),
         max_drawdown_pct=_env_float("RS_MAX_DRAWDOWN_PCT", 0.15),
         min_trade_value_usdt=_env_float("RS_MIN_TRADE_VALUE_USDT", 10.0),
-        max_daily_trades=_env_int("RS_MAX_DAILY_TRADES", 10),
         cooldown_seconds=_env_int("RS_COOLDOWN_SECONDS", 3600),
         drift_threshold_pct=_env_float("RS_DRIFT_THRESHOLD_PCT", 0.05),
         target_cash_pct=_env_float("RS_TARGET_CASH_PCT", 0.10),

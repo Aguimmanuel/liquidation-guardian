@@ -189,7 +189,6 @@
   .chip-badge.WATCH{background:var(--ambbg);color:var(--amb)}
   .chip-badge.OPEN,.chip-badge.TRANSFER{background:var(--blubg);color:var(--blu)}
   .chip-badge.CLOSE,.chip-badge.TRADE,.chip-badge.REDUCE{background:var(--redbg);color:var(--red)}
-  .chip-badge.locked{background:var(--ambbg);color:var(--amb)}
   .chip-badge.auto{background:var(--ambbg);color:var(--amb)}
 
   /* ---------- trade panel ---------- */
@@ -234,6 +233,11 @@
   .tpslrow input{width:76px;padding:4px 6px;font-size:11.5px;border-radius:7px;font-variant-numeric:tabular-nums;text-align:right}
   .closebtn{border:none;background:transparent;color:var(--dim);cursor:pointer;font-size:16px;line-height:1}
   .closebtn:hover{color:var(--red)}
+  .relbtn{border:1px solid var(--line);background:transparent;color:var(--grn);cursor:pointer;font-size:13px;line-height:1;border-radius:6px;padding:3px 6px;margin-right:4px}
+  .relbtn:hover{background:rgba(80,220,120,.12);border-color:var(--grn)}
+  .walletbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:9px;background:var(--panel2);font-size:12px}
+  .walletbar .wamt{font-weight:800;font-variant-numeric:tabular-nums}
+  .walletbar .wnote{color:var(--dim);font-size:10.5px;flex-basis:100%}
 
   /* ---------- proposals ---------- */
   .prop{border:1px solid var(--line);border-radius:9px;padding:6px 8px;margin-bottom:5px;background:var(--panel2)}
@@ -254,12 +258,6 @@
   .re .u{font-size:10.5px;color:var(--dim)}
   .re.saved input{border-color:var(--grn)}
   .re input:disabled{opacity:.55;cursor:not-allowed}
-  .budget-box{border:1px solid var(--line);background:var(--panel2);border-radius:9px;padding:7px 9px;margin-top:6px}
-  .budget-box .bh{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px}
-  .budget-box .bh>*{min-width:0}
-  .budget-box .used{font-weight:800;font-variant-numeric:tabular-nums}
-  .bar{height:7px;background:var(--line);border-radius:7px;margin-top:9px;overflow:hidden}
-  .bar>div{height:100%;border-radius:7px;background:linear-gradient(90deg,var(--grn),var(--amb) 72%,var(--red));transition:width .4s}
   .cnt{font-size:11.5px;color:var(--dim);margin-top:7px;font-variant-numeric:tabular-nums}
   .gr-note{font-size:10.5px;color:var(--dim);margin-top:9px}
 
@@ -330,7 +328,6 @@
     .rightcol > .card:nth-child(5) .rails-edit{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
     .rightcol > .card:nth-child(5) .re{padding:4px 6px}
     .rightcol > .card:nth-child(5) .re .hint{display:inline;white-space:nowrap;margin-left:3px}
-    .rightcol > .card:nth-child(5) .budget-box{padding:5px 8px;margin-top:4px}
     .rightcol > .card:nth-child(5) .gr-note{margin-top:5px}
     #tradeCard{padding:7px}
     #tradeCard h2{margin-bottom:4px}
@@ -411,7 +408,7 @@
       <div class="tile"><div class="lbl">Total value</div><div class="val" id="tTotal">—</div><div class="sub" id="tDraw">drawdown —</div></div>
       <div class="tile"><div class="lbl">Spot cash</div><div class="val" id="tCash">—</div><div class="sub" id="tSpot">holdings —</div></div>
       <div class="tile"><div class="lbl">Futures equity</div><div class="val" id="tFut">—</div><div class="sub" id="tUnreal">unrealized —</div></div>
-      <div class="tile"><div class="lbl">Trades today</div><div class="val" id="tTrades">—</div><div class="sub" id="tTradeSub">nearest liq —</div></div>
+      <div class="tile"><div class="lbl">Nearest liq</div><div class="val" id="tNear">—</div><div class="sub" id="tNearSub">no positions</div></div>
     </div>
 
     <!-- Trade panel: dropdown coin + fixed Short/Long, price above name -->
@@ -459,6 +456,7 @@
           <tbody id="positions"><tr><td colspan="11"><div class="empty">Loading positions…</div></td></tr></tbody>
         </table>
       </div>
+      <div class="walletbar" id="walletBar" style="display:none"></div>
     </div>
 
     <!-- Pending proposals -->
@@ -470,7 +468,7 @@
 
     <!-- Guardrails -->
     <div class="card">
-      <h2>Guardrails <span class="right" id="railsNote"></span></h2>
+      <h2>Guardrails <span class="right" id="railsNote">editable</span></h2>
       <div id="railsRoot"></div>
     </div>
 
@@ -779,7 +777,7 @@ $("btnReset").addEventListener("click",async()=>{
 /* ---------------- stats ---------------- */
 function renderStats(){
   if(!S||!S.account) return;
-  const a=S.account, g=S.guardrails, gs=S.guardrail_status||{};
+  const a=S.account, g=S.guardrails, gs=S.guardrail_status||{}, rs=S.risk_summary||{};
   $("tTotal").textContent=fmtP(a.total_value_usdt);
   $("tDraw").textContent="drawdown "+a.drawdown_pct+"%";
   $("tCash").textContent=fmtP(a.cash_usdt);
@@ -787,13 +785,14 @@ function renderStats(){
   $("tFut").textContent=fmtP(a.futures_equity_usdt);
   const unreal=a.futures_positions.reduce((s,p)=>s+p.unrealized_pnl_usdt,0);
   $("tUnreal").innerHTML="unrealized <b class='"+cls(unreal)+"'>"+sign(unreal)+"</b>";
-  const cap=(gs.budget?gs.budget.trades_cap:g.max_daily_trades);
-  const used=a.trade_count_today;
-  $("tTrades").textContent=used+" / "+cap;
-  $("tTrades").style.color= used>=cap?"var(--red)":used>=cap*0.8?"var(--amb)":"inherit";
   const near=S.risk_summary.nearest_distance_pct;
-  const nearTxt=(near!==undefined&&near<100)?("nearest liq "+near+"%"):("no positions");
-  $("tTradeSub").innerHTML=(gs.locked?"🔒 locked · ":"")+nearTxt;
+  const open=(a.futures_positions||[]).length;
+  const nDanger=rs.danger||0, nWatch=rs.watch_count||0;
+  $("tNear").textContent=(near!==undefined&&near<100)?near+"%":"—";
+  $("tNear").style.color=nDanger?"var(--red)":(nWatch?"var(--amb)":"inherit");
+  $("tNearSub").textContent=open
+    ?(nDanger?(open+" open · "+nDanger+" danger"):(nWatch?(open+" open · "+nWatch+" watching"):open+" open · all clear"))
+    :"no positions";
 }
 
 /* ---------------- positions (incremental to protect TP/SL typing) ---------------- */
@@ -801,11 +800,22 @@ function focusedInside(rootSel){
   const ae=document.activeElement;
   return !!(ae&&ae.tagName==="INPUT"&&ae.closest(rootSel));
 }
-function posKey(fps){ return fps.map(p=>p.symbol+"|"+p.side+"|"+p.quantity.toFixed(6)).join(","); }
+function posKey(fps){ return fps.map(p=>p.symbol+"|"+p.side+"|"+p.quantity.toFixed(6)+"|"+p.margin_usdt.toFixed(2)).join(","); }
 function renderPositions(){
   const fps=(S.account&&S.account.futures_positions)||[];
   const danger=fps.filter(p=>p.risk==="DANGER").length;
   $("posNote").textContent=fps.length+" open"+(danger?" · "+danger+" danger":" · all clear");
+  // free futures-wallet balance -> spot control (idle money only; never part
+  // of an open position's margin, so returning it can't weaken protection)
+  const wfree=S.account.futures_wallet_usdt||0, wb=$("walletBar");
+  if(wb){
+    if(wfree>0){
+      wb.style.display="flex";
+      wb.innerHTML='<span>Free futures balance <span class="wamt">'+fmtP(wfree)+'</span></span>'
+        +'<button class="btn sm grn" onclick="returnWallet()">↩ Move to spot</button>'
+        +'<span class="wnote">Idle USDT sitting in the futures wallet (from closed positions / realized PnL). No open position uses it, so moving it back to spot never reduces liquidation protection.</span>';
+    } else wb.style.display="none";
+  }
   const key=posKey(fps);
   if(!fps.length){
     if(lastPosKey!==""){
@@ -857,7 +867,10 @@ function rowHTML(p){
       <span class="lbl tp">TP</span><input id="tp-${p.symbol}" type="number" step="any" placeholder="—" value="${tp?p.take_profit_price:""}">
       <button class="btn sm grn" onclick="armTpSl('${p.symbol}')">Arm</button>
     </div></td>
-    <td><button class="closebtn" title="Close position" onclick="closePos('${p.symbol}')">✕</button></td>
+    <td style="white-space:nowrap">
+      ${p.releasable_margin_usdt?`<button class="relbtn" title="Release ${fmtP(p.releasable_margin_usdt)} excess margin back to spot (keeps the position at its de-risk headroom)" onclick="releaseMargin('${p.symbol}')">↩</button>`:""}
+      <button class="closebtn" title="Close position" onclick="closePos('${p.symbol}')">✕</button>
+    </td>
   </tr>`;
 }
 async function armTpSl(symbol){
@@ -887,6 +900,29 @@ async function closePos(symbol){
     await refreshState();
   }catch(e){ errToast(e.message); }
 }
+async function releaseMargin(symbol){
+  const p=(S.account.futures_positions||[]).find(x=>x.symbol===symbol);
+  const amt=p&&p.releasable_margin_usdt;
+  if(!amt){ toast("Nothing to release",symbol+" holds no excess margin right now.","warn"); return; }
+  if(!confirm("Release "+fmtP(amt)+" excess margin on "+symbol+" back to spot? The position keeps its de-risk headroom — this only returns margin you no longer need.")) return;
+  try{
+    const r=await api("/api/return",{method:"POST",body:JSON.stringify({scope:"position",symbol})});
+    if(r.state) S=r.state;
+    addMsg(r.message,"agent");
+    await refreshState();
+  }catch(e){ errToast(e.message); }
+}
+async function returnWallet(){
+  const amt=S.account.futures_wallet_usdt||0;
+  if(amt<=0) return;
+  if(!confirm("Move "+fmtP(amt)+" of free futures balance back to spot cash? No open position uses this money.")) return;
+  try{
+    const r=await api("/api/return",{method:"POST",body:JSON.stringify({scope:"wallet"})});
+    if(r.state) S=r.state;
+    addMsg(r.message,"agent");
+    await refreshState();
+  }catch(e){ errToast(e.message); }
+}
 
 /* ---------------- proposals ---------------- */
 function renderProposals(){
@@ -898,7 +934,9 @@ function renderProposals(){
     return;
   }
   box.innerHTML=list.map(p=>{
-    const kindLbl=p.kind==="TRANSFER"?"ADD MARGIN":p.kind==="OPEN"?"OPEN":p.kind==="CLOSE"?"CLOSE":"REDUCE";
+    let kindLbl;
+    if(p.kind==="TRANSFER") kindLbl=p.transfer_kind==="RETURN_WALLET"?"MOVE TO SPOT":(p.transfer_kind==="RELEASE_MARGIN"?"RELEASE MARGIN":"ADD MARGIN");
+    else kindLbl=p.kind==="OPEN"?"OPEN":(p.kind==="CLOSE"?"CLOSE":"REDUCE");
     return `<div class="prop">
       <div class="r1"><span class="chip-badge ${p.kind}">${kindLbl}</span><b>${esc(p.symbol)}</b>
         <span>≈ ${fmtP(p.est_value_usdt)}</span>
@@ -935,13 +973,6 @@ const RAIL_KEYS=[
 ];
 function pctToInput(v){ return +(Math.round(v*1000)/10).toFixed(1); }
 function inputToRail(k,v){ return k.endsWith("_pct")? (v/100) : v; }
-/* One-way ratchet while the profile is locked: which direction of change is a
-   *loosening* (blocked until the 24h window releases). Mirrors the backend. */
-const LOOSEN_DIR={
-  max_daily_trades:1, max_leverage:1, max_trade_pct:1,
-  min_trade_value_usdt:0,                       // dust filter — not a risk ceiling
-  cooldown_seconds:-1, liq_warn_pct:-1, liq_danger_pct:-1, liq_target_dist_pct:-1,
-};
 function curRail(key){
   const gs=(S&&S.guardrail_status)||{}; const vals=gs.values||{};
   if(vals[key]!==undefined) return vals[key];
@@ -950,18 +981,7 @@ function curRail(key){
 function railToShown(k,v){
   if(v===undefined||v===null) return "";
   if(k.endsWith("_pct")) return pctToInput(v);
-  if(k==="max_daily_trades") return Math.round(v);
   return v;
-}
-function isLoosening(key,newVal){
-  const dir=LOOSEN_DIR[key]; if(!dir) return false;
-  const cur=curRail(key);
-  if(typeof cur!=="number") return false;
-  return (dir>0&&newVal>cur)||(dir<0&&newVal<cur);
-}
-function lockRemainingLabel(gs){
-  const rem=(gs&&gs.lock_remaining_seconds!==undefined)?gs.lock_remaining_seconds:0;
-  return Math.floor(rem/3600)+"h "+String(Math.floor(rem%3600/60)).padStart(2,"0")+"m";
 }
 function buildRails(){
   const gs=(S&&S.guardrail_status)||{};
@@ -976,39 +996,19 @@ function buildRails(){
         <span class="iv"><input id="in-${k}" type="number" step="${isPct?0.1:1}" value="${shown}"><span class="u">${u}</span></span></div>`;
     }).join('')+
     '</div>'+
-    `<div class="budget-box">
-      <div class="bh"><span style="color:var(--mut);font-weight:800">Daily trade budget</span>
-        <span class="used" id="budUsed">—</span><span id="budLockTag"></span>
-        <span style="margin-left:auto">
-          <input id="in-cap" type="number" min="1" step="1" value="${(vals.max_daily_trades!==undefined?vals.max_daily_trades:(S?S.guardrails.max_daily_trades:10))}">
-          <button class="btn sm amb" id="btnLockBudget" style="margin-left:6px">🔒 Lock profile 24h</button>
-        </span></div>
-      <div class="bar"><div id="budBar" style="width:0%"></div></div>
-      <div class="cnt" id="budCnt"></div>
-    </div>`+
-    '<div class="gr-note">Edits apply instantly and persist across restarts. <b>Lock profile</b> commits every limit for 24 hours: while locked you can still make any limit stricter, but loosening is refused and there is no early unlock — by design.</div>';
+    '<div class="gr-note">Edits apply instantly and persist across restarts. There is no per-day trade budget: the guardian only protects, so its actions are never capped by a calendar window — danger is handled whenever it appears.</div>';
   RAIL_KEYS.forEach(([k])=>{
     const el=$("in-"+k);
     if(el) el.addEventListener("change",()=>saveRail(k));
   });
-  $("btnLockBudget").addEventListener("click",lockBudget);
-  $("in-cap").addEventListener("change",()=>saveRail("max_daily_trades"));
 }
 let railTimers={};
 function saveRail(key){
-  const el = key==="max_daily_trades" ? $("in-cap") : $("in-"+key);
+  const el=$("in-"+key);
   if(!el) return;
   const raw=parseFloat(el.value);
   if(isNaN(raw)) return;
   const val=inputToRail(key,raw);
-  const gs=(S&&S.guardrail_status)||{};
-  // while the profile is locked, refuse a loosening edit locally (the server
-  // enforces the same rule for chat/API callers — this just gives instant UX)
-  if(gs.locked&&isLoosening(key,val)){
-    el.value=railToShown(key,curRail(key));       // snap back to the locked value
-    toast("Profile locked","That change would loosen a locked limit. You can still make any limit stricter; loosening unlocks in "+lockRemainingLabel(gs)+".","warn");
-    return;
-  }
   clearTimeout(railTimers[key]);
   railTimers[key]=setTimeout(async()=>{
     try{
@@ -1023,15 +1023,6 @@ function saveRail(key){
     }
   },450);
 }
-async function lockBudget(){
-  try{
-    const r=await api("/api/guardrails",{method:"POST",body:JSON.stringify({values:{daily_trades_locked:true}})});
-    if(r.state) S=r.state;
-    addMsg(r.message,"agent");
-    refreshGuardrailReadouts();
-    await refreshState();
-  }catch(e){ errToast(e.message); }
-}
 function refreshGuardrailReadouts(){
   const gs=S.guardrail_status||{}; const vals=gs.values||{};
   const g=S.guardrails;
@@ -1041,30 +1032,7 @@ function refreshGuardrailReadouts(){
     const shown=isPct?pctToInput(server):server;
     if(!focusedInside("#railsRoot")&&String(el.value)!==String(shown)) el.value=shown;
   });
-  const capEl=$("in-cap");
-  if(capEl){
-    const cap=vals.max_daily_trades!==undefined?vals.max_daily_trades:g.max_daily_trades;
-    if(!focusedInside("#railsRoot")&&String(capEl.value)!==String(cap)) capEl.value=cap;
-    // tightening stays editable while locked (the one-way ratchet refuses
-    // loosening in saveRail); the server enforces the same rule
-  }
-  const b=gs.budget;
-  if(b){
-    $("budUsed").textContent=b.trades_used+" / "+b.trades_cap;
-    const usedPct=b.trades_cap>0?Math.min(100,b.trades_used/b.trades_cap*100):0;
-    $("budBar").style.width=usedPct+"%";
-    const rem=gs.lock_remaining_seconds!==undefined?gs.lock_remaining_seconds:(b.window_remaining_seconds||0);
-    const hh=Math.floor(rem/3600),mm=Math.floor(rem%3600/60),ss=rem%60;
-    const hms=[hh,mm,ss].map(x=>String(x).padStart(2,"0")).join(":");
-    $("budLockTag").innerHTML=gs.locked?`<span class="chip-badge locked">🔒 profile locked</span>`:"";
-    $("budCnt").textContent=gs.locked
-      ?("Risk profile locked. Loosening refused until release in "+hms+". Tightening a limit is still allowed.")
-      :("Window resets in "+hms+". Lock the whole profile when you want to commit for 24h.");
-    $("btnLockBudget").style.display=gs.locked?"none":"";
-  }
-  $("railsNote").innerHTML=gs.locked
-    ?'<span style="color:var(--amb)">🔒 locked · tightening only · '+lockRemainingLabel(gs)+'</span>'
-    :"editable";
+  $("railsNote").textContent="editable";
 }
 
 /* ---------------- conditions ---------------- */
@@ -1097,6 +1065,7 @@ const SPOKEN={
   de_risk_proposed:"🛡️ de-risk proposed", de_risk_blocked:"⛔ de-risk blocked",
   auto_protect_scan:"🔭 auto-protect scan", auto_de_risk:"🛡️ auto de-risk",
   monitor_zone:"🛰️ monitoring", de_risk_alert:"🚨 danger — plan queued",
+  return_proposed:"↩️ return to spot proposed", release_proposed:"↩️ margin release proposed",
   execution_rejected:"⚠️ declined", auto_mode:"⚡ automatic action",
   agent_mode_auto:"⚡ auto mode on", agent_mode_manual:"🧭 manual mode",
 };
@@ -1201,9 +1170,9 @@ const TOUR=[
   {sel:"#ticker",title:"Live prices",txt:"BTC, ETH, BNB and SOL stream here in real time, with 24h change. Prices flash green/red the instant they move. This is the same feed used to mark your positions."},
   {sel:"#seg",title:"Agent mode",txt:"Manual (default): I propose every action and wait for your approval. Automatic: I act on your behalf after you accept a clear risk notice. You can switch at any time."},
   {sel:"#tradeCard",title:"Trade panel",txt:"Pick a coin from the dropdown. Price sits above the coin name. Long and Short sit side by side — set leverage (blank = 10x, capped by your guardrail) and the USDT margin, then Open. Every order waits for approval unless you're in Auto mode."},
-  {sel:"#positions",title:"Positions + TP/SL",txt:"Each open position shows entry, mark, liquidation price, distance and PnL. Set a Take-Profit and Stop-Loss per position and arm it — the guardian executes exits automatically the moment a level is crossed."},
-  {sel:"#proposals",title:"Pending proposals",txt:"In manual mode all actions land here first: de-risks, opens, closes, condition triggers. Read the reasoning and Approve or Reject each one — nothing executes without you."},
-  {sel:"#btnLockBudget",title:"Guardrails & daily lock",txt:"Edit risk thresholds live: danger zone, de-risk target, order size, leverage cap and more. Set your daily trade budget and Lock it for 24h — once locked it cannot be unlocked early. That's the discipline feature."},
+  {sel:"#positions",title:"Positions + money flows",txt:"Each open position shows entry, mark, liquidation price, distance and PnL. Two exits of money: ↩ releases excess margin (keeps the position at its de-risk headroom) and ✕ closes it. When money sits idle in the futures wallet, a bar below the table moves it back to spot — funds are never trapped."},
+  {sel:"#railsRoot",title:"Guardrails",txt:"Edit risk thresholds live: danger zone, watch zone, de-risk target, order size, leverage cap, cooldown and more. There's no per-day trade budget — the guardian only protects, so it can act on danger any hour of any day."},
+  {sel:"#proposals",title:"Pending proposals",txt:"In manual mode all actions land here first: de-risks, opens, closes, fund moves, condition triggers. Read the reasoning and Approve or Reject each one — nothing executes without you."},
   {sel:"#btnMore",title:"More tools",txt:"Optional tools live here: market analysis, price conditions, and the audit trail. The main screen stays focused on liquidation protection."},
   {sel:"#input",title:"Talk to it",txt:"Plain language works: “risk report”, “protect my positions”, “market analysis”, “status”, or “if BTC drops below 60,000, add 400 margin”. Have fun — and trade carefully."},
 ];

@@ -18,7 +18,8 @@ positions from liquidation risk.
 - **Explains the safest next step.** When a position gets dangerous, the agent
   proposes the two standard protection paths: reduce exposure or add margin.
 - **Applies guardrails before action.** Every action is checked against size,
-  wallet, leverage, cooldown, drawdown, and daily-budget rules.
+  wallet, leverage, cooldown, drawdown, symbol-allowlist, and cash rules — with
+  no per-day trade cap, so protection can never be frozen by a calendar limit.
 - **An always-on guardian.** It watches every open position around the clock
   in *both* modes, logs risk-zone changes (OK → WATCH → DANGER) as they
   happen, and escalates the moment one reaches the danger zone: in manual
@@ -29,12 +30,18 @@ positions from liquidation risk.
 - **Adds contextual analysis when useful.** A per-coin market read can help the
   operator understand trend, support/resistance, and whether risk should be
   reduced or preserved.
-- **A risk profile you can lock for 24 hours.** Every limit — danger/warn
-  zones, de-risk target, order size, leverage cap, cooldown, daily trade
-  budget — is editable in the UI and persists across restarts. **Lock the
-  profile** to commit: while locked you can still make any limit *stricter*,
-  but loosening any limit is refused (a one-way ratchet) until the 24-hour
-  window ends. There is no early unlock, by design.
+- **An editable, persistent risk profile — with no per-day trade cap.** Every
+  limit (danger/warn zones, de-risk target, order size, leverage cap,
+  cooldown) is editable in the UI, sanity-bounded, and survives restarts.
+  There is deliberately no "trades per day" budget: the guardian only
+  *protects*, so its actions are never frozen by a calendar window — a
+  position in danger is handled whenever it appears.
+- **Money can always come home.** Spot → futures is never a one-way door.
+  Closing a position parks its margin and PnL in the futures wallet; a bar
+  under the positions table moves that free balance back to spot. And a
+  per-position `↩` releases margin you no longer need off an open position —
+  bounded so the position keeps its de-risk headroom and its effective
+  leverage never exceeds the cap.
 
 This scope is deliberate. The project is not trying to be a broad autonomous
 trading system; it is an AI risk agent for futures protection and staged
@@ -78,9 +85,13 @@ Suggested first run:
 2. In the positions table, arm a **take-profit** and a **stop-loss**.
 3. Hit **📈 Market analysis** and pick a coin for the deep read.
 4. Say `protect my positions` — the guardian proposes reduce and add-margin.
-5. Approve the reduce: liquidation jumps from ~4.5% to ~15% headroom.
-6. Open **Guardrails**, tighten the limits and **Lock profile** — then try
-   loosening one to watch the 24-hour one-way ratchet refuse it.
+5. Approve the reduce: liquidation jumps from ~4.5% to ~15% headroom. The
+   proceeds that were parked in the futures wallet can be moved back to spot
+   with the **↩ Move to spot** bar, and margin you no longer need on an open
+   position can be released per-row with the **↩** button.
+6. Open **Guardrails** and edit a limit — it applies instantly and persists
+   across restarts. There's no trade-count budget to babysit; the guardian
+   protects any hour of any day.
 7. Try the **⚡ Auto** agent mode and read the consent notice before enabling.
    Let prices drift against your position: automatic mode de-risks it on its
    own, without you asking.
@@ -114,7 +125,7 @@ with a small amount in the sub-account and work up.
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 53 unit tests, no network needed
+python -m pytest tests/ -q            # 58 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```
@@ -151,15 +162,13 @@ main knobs:
 | `RS_LIQ_TARGET_DIST_PCT` | `0.15` | de-risk until 15% headroom |
 | `RS_MAX_TRADE_PCT` | `0.10` | max order size as share of portfolio (buys/margin) |
 | `RS_MIN_TRADE_VALUE_USDT` | `10.0` | ignore dust-size orders |
-| `RS_MAX_DAILY_TRADES` | `10` | executions per 24-hour window (UI-editable + lockable) |
 | `RS_MAX_LEVERAGE` | `50` | leverage cap when opening trades (UI-editable) |
 | `RS_TICKER_TTL` | `1` | live-ticker refresh interval in seconds |
 | `RS_SYMBOL_ALLOWLIST` | BTC,ETH,BNB,SOL | empty = allow any symbol |
 | `OPENAI_API_KEY` | — | optional: LLM narration + intent parsing |
 
-Env vars are the boot defaults only. Edits made in the UI — plus any profile
-lock — are persisted to `data/guardrail_state.json`, so your settings survive
-restarts; a locked profile releases itself when its 24-hour window completes.
+Env vars are the boot defaults only. Edits made in the UI are persisted to
+`data/guardrail_state.json`, so your profile survives restarts.
 
 ## Notes
 

@@ -25,10 +25,9 @@ from app.models import (
     ProposalKind,
     Side,
     TradeProposal,
+    TransferKind,
     utcnow,
 )
-
-WINDOW_SECONDS = 24 * 3600
 
 
 class SimAdapter:
@@ -73,8 +72,6 @@ class SimAdapter:
             futures_positions=[],
             peak_value_usdt=self.config.default_initial_cash,
             realized_pnl_usdt=0.0,
-            trade_count_today=0,
-            daily_window_start=now,
             last_trade_at=None,
             updated_at=now,
         )
@@ -89,8 +86,6 @@ class SimAdapter:
             "futures_wallet_usdt": state.futures_wallet_usdt,
             "peak_value_usdt": state.peak_value_usdt,
             "realized_pnl_usdt": state.realized_pnl_usdt,
-            "trade_count_today": state.trade_count_today,
-            "daily_window_start": state.daily_window_start.isoformat() if state.daily_window_start else None,
             "last_trade_at": state.last_trade_at.isoformat() if state.last_trade_at else None,
             "positions": [
                 {"symbol": p.symbol, "quantity": p.quantity, "price": p.price}
@@ -115,7 +110,6 @@ class SimAdapter:
 
     def _from_dict(self, raw: dict) -> AccountState:
         last = datetime.fromisoformat(raw["last_trade_at"]) if raw.get("last_trade_at") else None
-        win = datetime.fromisoformat(raw["daily_window_start"]) if raw.get("daily_window_start") else None
         futures = []
         for fp in raw.get("futures_positions", []):
             futures.append(
@@ -151,23 +145,11 @@ class SimAdapter:
             futures_positions=futures,
             peak_value_usdt=float(raw.get("peak_value_usdt", 0.0)),
             realized_pnl_usdt=float(raw.get("realized_pnl_usdt", 0.0)),
-            trade_count_today=int(raw.get("trade_count_today", 0)),
-            daily_window_start=win,
             last_trade_at=last,
             updated_at=utcnow(),
         )
 
     # ------------------------------------------------------------- account
-    def _roll_daily_window(self, state: AccountState) -> None:
-        """Every 24h the trade budget resets (psychological reset)."""
-        now = utcnow()
-        if state.daily_window_start is None:
-            state.daily_window_start = now
-            return
-        if (now - state.daily_window_start).total_seconds() >= WINDOW_SECONDS:
-            state.trade_count_today = 0
-            state.daily_window_start = now
-
     async def refresh_prices(self) -> None:
         """Mark spot and futures positions to market using the live feed."""
         self._load()
@@ -203,7 +185,6 @@ class SimAdapter:
         self._load()
         state = self._state
         assert state is not None
-        self._roll_daily_window(state)
         spot = state.cash_usdt + sum(p.value_usdt for p in state.positions)
         state.spot_value_usdt = spot
         total = spot + state.futures_equity_usdt
@@ -288,7 +269,6 @@ class SimAdapter:
             executed = gross
 
         if not bootstrap:
-            state.trade_count_today += 1
             state.last_trade_at = utcnow()
         self._save()
         return OrderResult(
@@ -303,10 +283,105 @@ class SimAdapter:
         )
 
     def _execute_transfer(self, proposal: TradeProposal, bootstrap: bool) -> OrderResult:
-        """Add USDT margin to an existing futures position (from spot cash)."""
+        """Move USDT between the spot wallet and the futures side.
+
+        TransferKind decides the direction and source:
+          ADD_MARGIN     spot -> futures (position margin, or the futures wallet
+                          if the position no longer exists),
+          RETURN_WALLET  futures wallet free balance -> spot,
+          RELEASE_MARGIN excess margin on an open position -> spot (bounded so
+                          the position keeps its de-risk headroom and never
+                          exceeds the leverage cap).
+        """
+        from app.agent.risk import evaluate_position, releasable_margin
+
         state = self._state
         assert state is not None
+        kind = proposal.transfer_kind or TransferKind.ADD_MARGIN
         amount = proposal.est_value_usdt
+
+        if kind == TransferKind.RETURN_WALLET:
+            take = min(amount, state.futures_wallet_usdt)
+            if take < 1e-9:
+                return OrderResult(
+                    ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                    side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                    message="the futures wallet has no free balance to return",
+                )
+            state.futures_wallet_usdt -= take
+            state.cash_usdt += take
+            if not bootstrap:
+                state.last_trade_at = utcnow()
+            self._save()
+            return OrderResult(
+                ok=True,
+                proposal_id=proposal.id,
+                symbol=proposal.symbol,
+                side=proposal.side,
+                executed_price=0.0,
+                executed_value_usdt=round(take, 2),
+                fee_usdt=0.0,
+                message=f"moved ${take:,.2f} from the futures wallet back to spot",
+            )
+
+        if kind == TransferKind.RELEASE_MARGIN:
+            fp = next(
+                (p for p in state.futures_positions if p.symbol == proposal.symbol),
+                None,
+            )
+            if fp is None:
+                return OrderResult(
+                    ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                    side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                    message="no open position to release margin from",
+                )
+            target = self.guardrails.liq_target_dist_pct
+            if target <= self.guardrails.liq_warn_pct:
+                return OrderResult(
+                    ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                    side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                    message=(
+                        "release suspended: the de-risk target must stay above the "
+                        "watch zone so releasing margin can't push a position into risk"
+                    ),
+                )
+            price = proposal.est_price if proposal.est_price > 0 else fp.mark_price
+            if price <= 0:
+                return OrderResult(
+                    ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                    side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                    message="no mark price available to size the margin release",
+                )
+            take = min(amount, releasable_margin(
+                fp, price, target, self.guardrails.max_leverage
+            ))
+            if take < 1e-9:
+                return OrderResult(
+                    ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                    side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                    message="nothing to release — the position holds no excess margin right now",
+                )
+            fp.margin_usdt -= take
+            state.cash_usdt += take
+            evaluate_position(
+                fp, fp.mark_price or price,
+                self.guardrails.liq_warn_pct, self.guardrails.liq_danger_pct,
+            )
+            if not bootstrap:
+                state.last_trade_at = utcnow()
+            self._save()
+            return OrderResult(
+                ok=True,
+                proposal_id=proposal.id,
+                symbol=proposal.symbol,
+                side=proposal.side,
+                executed_price=0.0,
+                executed_value_usdt=round(take, 2),
+                fee_usdt=0.0,
+                message=f"released ${take:,.2f} margin on {proposal.symbol} back to spot",
+            )
+
+        # --- ADD_MARGIN (default / legacy): spot cash -> futures -------------
         if state.cash_usdt < amount:
             return OrderResult(
                 ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
@@ -320,7 +395,6 @@ class SimAdapter:
         else:
             state.futures_wallet_usdt += amount
         if not bootstrap:
-            state.trade_count_today += 1
             state.last_trade_at = utcnow()
         self._save()
         return OrderResult(
@@ -387,7 +461,6 @@ class SimAdapter:
 
         evaluate_position(fp, price, self.guardrails.liq_warn_pct, self.guardrails.liq_danger_pct)
         if not bootstrap:
-            state.trade_count_today += 1
             state.last_trade_at = utcnow()
         self._save()
         return OrderResult(
@@ -522,8 +595,6 @@ class SimAdapter:
             futures_positions=[],
             peak_value_usdt=cash or self.config.default_initial_cash,
             realized_pnl_usdt=0.0,
-            trade_count_today=0,
-            daily_window_start=now,
             last_trade_at=None,
             updated_at=now,
         )

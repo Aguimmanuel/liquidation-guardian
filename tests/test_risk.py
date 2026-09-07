@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.agent.risk import (
     distance_pct,
     evaluate_position,
     liq_price,
+    margin_for_target,
     portfolio_risk_summary,
     position_risk_context,
+    releasable_margin,
     required_cut,
     required_margin,
     risk_level,
@@ -137,3 +141,60 @@ def test_portfolio_risk_summary_ranks_the_most_dangerous_trade_first():
         "reduce" in summary["top_risk"]["advice"].lower()
         or "add margin" in summary["top_risk"]["advice"].lower()
     )
+
+
+# ---------------------------------------------------------------------------
+# Two-way money movement helpers (margin_for_target / releasable_margin)
+# ---------------------------------------------------------------------------
+
+
+def test_margin_for_target_is_positive_when_position_is_under_margined():
+    pos = make_pos(entry=65_000.0, margin=1_000.0, leverage=20.0)  # qty = 0.3077...
+    need = margin_for_target(pos, 65_000.0, 0.15)
+    # at 20x the position needs ~15.5x margin to reach 15% headroom, so the
+    # target margin must exceed the current 1,000
+    assert need > pos.margin_usdt
+    # consistency: required_margin is exactly the shortfall
+    assert required_margin(pos, 65_000.0, 0.15) == pytest.approx(need - pos.margin_usdt)
+
+
+def test_releasable_margin_zero_when_still_under_margined():
+    pos = make_pos(entry=65_000.0, margin=1_000.0, leverage=20.0)
+    assert releasable_margin(pos, 65_000.0, 0.15, 50.0) == 0.0
+
+
+def test_releasable_margin_pulls_only_excess_down_to_target_and_leverage():
+    # over-margined position (5x effective) — safe to release some margin
+    pos = make_pos(entry=65_000.0, margin=10_000.0, leverage=5.0)  # notional 50k
+    mark = 65_000.0
+    rel = releasable_margin(pos, mark, 0.15, 50.0)
+    assert rel > 0.0
+    keep = pos.margin_usdt - rel
+    # after releasing, the remaining margin keeps at least 15% headroom
+    assert keep >= margin_for_target(pos, mark, 0.15) - 0.01
+    # and effective leverage stays far inside the generous 50x cap
+    assert pos.entry_price * pos.quantity / keep <= 50.0 + 1e-6
+
+
+def test_releasable_margin_never_breaks_leverage_cap():
+    # a strict leverage cap must win over the headroom floor: releasing down to
+    # the de-risk target would still leave effective leverage above the cap,
+    # so the leverage bound keeps more margin on the position
+    pos = make_pos(entry=65_000.0, margin=20_000.0, leverage=5.0)  # notional 100k
+    mark = 65_000.0
+    rel = releasable_margin(pos, mark, 0.15, 6.0)   # strict cap of 6x
+    assert rel > 0.0
+    keep = pos.margin_usdt - rel
+    assert pos.entry_price * pos.quantity / keep <= 6.0 + 1e-6
+    assert keep >= margin_for_target(pos, mark, 0.15) - 0.01
+    # with a looser cap the same position could return more margin
+    assert releasable_margin(pos, mark, 0.15, 50.0) > rel
+
+
+def test_releasable_margin_zero_for_degenerate_inputs():
+    empty = FuturesPosition(
+        symbol="BTCUSDT", side=PositionSide.LONG, entry_price=0.0,
+        quantity=0.0, leverage=10.0, margin_usdt=0.0, mmr=0.005, mark_price=0.0,
+    )
+    assert releasable_margin(empty, 0.0, 0.15, 50.0) == 0.0
+    assert margin_for_target(empty, 0.0, 0.15) == 0.0

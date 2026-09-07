@@ -32,11 +32,6 @@ class GuardrailError(Exception):
     """Raised only for truly unrecoverable config errors (never for blocks)."""
 
 
-def _utc_today_key(dt: datetime | None) -> str:
-    dt = dt or datetime.now(timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
-
-
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
@@ -103,15 +98,6 @@ def check_cooldown(
         ok,
         "cooldown",
         "" if ok else f"cooldown active — last trade {int(elapsed // 60)}m ago (need {cfg.cooldown_seconds // 60}m)",
-    )
-
-
-def check_daily_trade_count(trade_count_today: int, cfg: GuardrailConfig) -> CheckResult:
-    ok = trade_count_today < cfg.max_daily_trades
-    return CheckResult(
-        ok,
-        "daily_trade_cap",
-        "" if ok else f"{trade_count_today}/{cfg.max_daily_trades} trades used today — daily cap reached",
     )
 
 
@@ -190,7 +176,6 @@ def evaluate_proposal(
             results.append(check_cooldown(state.last_trade_at, now, cfg))
         else:
             results.append(CheckResult(True, "cooldown", "user-commanded action — cooldown waived"))
-        results.append(check_daily_trade_count(state.trade_count_today, cfg))
         results.append(check_cash_sufficient(state.cash_usdt, proposal.est_value_usdt, cfg))
     else:
         results.append(CheckResult(True, "drawdown", "SELL allowed in drawdown (de-risking direction)"))

@@ -146,8 +146,6 @@ class AccountState:
     futures_wallet_usdt: float = 0.0  # free USDT in the futures wallet
     futures_positions: list[FuturesPosition] = field(default_factory=list)
     realized_pnl_usdt: float = 0.0
-    trade_count_today: int = 0
-    daily_window_start: Optional[datetime] = None
     last_trade_at: Optional[datetime] = None
     updated_at: datetime = field(default_factory=utcnow)
 
@@ -170,8 +168,6 @@ class AccountState:
             "peak_value_usdt": round(self.peak_value_usdt, 2),
             "realized_pnl_usdt": round(self.realized_pnl_usdt, 2),
             "drawdown_pct": round(drawdown * 100, 2),
-            "trade_count_today": self.trade_count_today,
-            "daily_window_start": iso(self.daily_window_start),
             "last_trade_at": iso(self.last_trade_at),
             "updated_at": iso(self.updated_at),
         }
@@ -194,6 +190,17 @@ class ProposalKind(str, Enum):
     CLOSE = "CLOSE"            # close a futures position (all or part)
 
 
+class TransferKind(str, Enum):
+    """Direction/meaning of a TRANSFER proposal (kept on the proposal so the
+    same decide/approve/execute pipeline handles all money movement)."""
+
+    ADD_MARGIN = "ADD_MARGIN"        # spot cash  -> futures (position margin,
+                                     #              or the futures wallet if the
+                                     #              position no longer exists)
+    RETURN_WALLET = "RETURN_WALLET"  # futures wallet free balance -> spot
+    RELEASE_MARGIN = "RELEASE_MARGIN"  # excess margin on an open position -> spot
+
+
 class ProposalStatus(str, Enum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
@@ -213,6 +220,8 @@ class TradeProposal:
     est_price: float
     reason: str                # human-readable "why"
     kind: ProposalKind = ProposalKind.TRADE
+    # TRANSFER proposals: which direction/meaning (None = legacy add-margin)
+    transfer_kind: Optional[TransferKind] = None
     # used when kind == OPEN: margin & leverage for the new position
     open_margin_usdt: float = 0.0
     open_leverage: float = 0.0
@@ -233,6 +242,7 @@ class TradeProposal:
             "symbol": self.symbol,
             "side": self.side.value,
             "kind": self.kind.value,
+            "transfer_kind": self.transfer_kind.value if self.transfer_kind else None,
             "open_margin_usdt": round(self.open_margin_usdt, 2) if self.open_margin_usdt else None,
             "open_leverage": self.open_leverage or None,
             "close_all": self.close_all,
