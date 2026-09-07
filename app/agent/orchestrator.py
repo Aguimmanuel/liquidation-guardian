@@ -14,6 +14,7 @@ explicit human approve, mirroring Binance Agent OS's confirm-before-execute.
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -44,7 +45,12 @@ from app.agent.risk import (
     required_cut,
     required_margin,
 )
-from app.config import AppConfig
+from app.config import (
+    EDITABLE_RAIL_KEYS,
+    LOOSEN_DIRECTION,
+    RAIL_BOUNDS,
+    AppConfig,
+)
 from app.market.client import MarketClient
 from app.models import (
     AccountState,
@@ -86,7 +92,9 @@ AUTO_MODE_NOTICE = (
     "⚠️ Automatic agent — read before enabling.\n\n"
     "When automatic mode is on, the agent acts on your behalf: it can reduce risk, "
     "add margin, close positions, and execute the conditions you arm, without asking "
-    "you to approve each step. Guardrails still apply, but guardrails cannot guarantee "
+    "you to approve each step. It also watches your open positions around the clock "
+    "and will de-risk them on its own before they reach liquidation — you do not have "
+    "to ask it to. Guardrails still apply, but guardrails cannot guarantee "
     "profit or prevent losses.\n\n"
     "Note that when using the automatic agent, agents can make mistakes."
 )
@@ -111,6 +119,10 @@ class Orchestrator:
         # auto = the agent may act on its own once the user consents.
         self.agent_mode: str = "manual"
         self.auto_consent: bool = False
+        # per-symbol throttle for the autonomous danger sweep (see
+        # auto_protect_scan) so a blocked retry never spams the audit trail.
+        self._auto_risk_attempt: dict[str, datetime] = {}
+        self._auto_risk_retry_s: float = 120.0
         self._load_guardrail_lock()
 
     # --------------------------------------------- guardrail lock persistence
@@ -126,6 +138,14 @@ class Orchestrator:
         return path
 
     def _save_guardrail_lock(self) -> None:
+        """Persist the editable profile + commitment lock.
+
+        The whole point of the lock is that it survives a restart, so this file
+        stores both the lock state and the values the profile was set to. The
+        profile values are persisted too, so an edited profile is a commitment
+        that does not silently reset on reboot. Best-effort: persistence must
+        never break the agent.
+        """
         g = self.guardrails
         try:
             payload = {
@@ -133,6 +153,8 @@ class Orchestrator:
                 "daily_lock_at": g.daily_lock_at.isoformat()
                 if g.daily_lock_at
                 else None,
+                "values": {k: getattr(g, k) for k in EDITABLE_RAIL_KEYS},
+                "symbol_allowlist": list(g.symbol_allowlist),
             }
             path = self._lock_path()
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,12 +163,39 @@ class Orchestrator:
             pass  # persistence is best-effort; never break the agent for it
 
     def _load_guardrail_lock(self) -> None:
+        """Apply a persisted profile (values + optional lock) at startup.
+
+        The saved values override env defaults — an edited profile is a
+        commitment the user chose, so it must not silently reset on reboot.
+        A lock that already finished its 24h window is released, but its
+        values are kept and re-persisted without the lock.
+        """
         g = self.guardrails
         try:
             path = self._lock_path()
             if not path.exists():
                 return
             payload = json.loads(path.read_text())
+            # back-compat: files written before the profile persisted values
+            if isinstance(payload.get("values"), dict):
+                for k in EDITABLE_RAIL_KEYS:
+                    if k not in payload["values"]:
+                        continue
+                    v = payload["values"][k]
+                    lo, hi = RAIL_BOUNDS.get(k, (float("-inf"), float("inf")))
+                    try:
+                        vf = float(v)
+                        if math.isfinite(vf) and lo <= vf <= hi:
+                            if k == "max_daily_trades":
+                                vf = round(vf)
+                            setattr(g, k, vf)
+                    except (TypeError, ValueError):
+                        continue
+            allow = payload.get("symbol_allowlist")
+            if isinstance(allow, list) and allow:
+                g.symbol_allowlist = [
+                    str(s).strip().upper() for s in allow if str(s).strip()
+                ]
             if payload.get("daily_trades_locked") and payload.get("daily_lock_at"):
                 at = datetime.fromisoformat(payload["daily_lock_at"])
                 # a lock that already ran its 24h no longer applies
@@ -154,7 +203,9 @@ class Orchestrator:
                     g.daily_trades_locked = True
                     g.daily_lock_at = at
                 else:
-                    path.unlink(missing_ok=True)
+                    g.daily_trades_locked = False
+                    g.daily_lock_at = None
+                    self._save_guardrail_lock()
         except Exception:
             pass
 
@@ -359,38 +410,7 @@ class Orchestrator:
             f"{len(danger)} position(s) in danger, {len(new_pending)} guardrailed proposal(s) queued",
         )
         if self._auto_active() and new_pending:
-            # prefer the reduce (deleverage, no extra capital) and only add
-            # margin when a reduce is not possible — never stack both.
-            chosen = [p for p in new_pending if p.kind == ProposalKind.TRADE]
-            if not chosen:
-                chosen = new_pending
-            chosen_ids = {p.id for p in chosen}
-            self.log(
-                AuditLevel.ACTION,
-                "auto_mode",
-                f"automatic mode executed {len(chosen)} de-risk action(s) without approval",
-            )
-            done = []
-            for prop in chosen:
-                self.decide(prop.id, True)
-                done.append(
-                    f"  • {prop.kind.value} {prop.symbol} ≈ ${prop.est_value_usdt:,.2f}"
-                )
-            # reject the options the agent didn't take so nothing confusing lingers
-            for prop in new_pending:
-                if prop.id not in chosen_ids and prop.status == ProposalStatus.PENDING:
-                    self.decide(prop.id, False)
-            return AgentResponse(
-                message=(
-                    "⚡ Automatic mode — the guardian de-risked your position(s) without waiting "
-                    "for approval:\n"
-                    + "\n".join(done)
-                    + "\n\nEvery action cleared the guardrails "
-                    "and is in the audit trail. Switch to Manual to go back to approving each step."
-                ),
-                intent="de_risk",
-                state=self.snapshot(),
-            )
+            return self._auto_exec_de_risk(new_pending)
         return AgentResponse(
             message=narrate_de_risk(danger, new_pending),
             intent="de_risk",
@@ -401,6 +421,115 @@ class Orchestrator:
                 if p.status == ProposalStatus.PENDING
             ],
         )
+
+    def _auto_exec_de_risk(
+        self,
+        new_pending: list[TradeProposal],
+        *,
+        event: str = "auto_mode",
+        headline: str = (
+            "⚡ Automatic mode — the guardian de-risked your position(s) without waiting "
+            "for approval"
+        ),
+    ) -> AgentResponse:
+        """Execute guardrailed de-risk proposals autonomously.
+
+        Prefers the reduce (deleverage, no extra capital) and only adds margin
+        when a reduce is not possible — never both. Rejects the unchosen option
+        so nothing confusing lingers in the queue.
+        """
+        chosen = [p for p in new_pending if p.kind == ProposalKind.TRADE]
+        if not chosen:
+            chosen = new_pending
+        chosen_ids = {p.id for p in chosen}
+        self.log(
+            AuditLevel.ACTION,
+            event,
+            f"automatic mode executed {len(chosen)} de-risk action(s) without approval",
+        )
+        done = []
+        for prop in chosen:
+            self.decide(prop.id, True)
+            done.append(
+                f"  • {prop.kind.value} {prop.symbol} ≈ ${prop.est_value_usdt:,.2f}"
+            )
+        # reject the options the agent didn't take so nothing confusing lingers
+        for prop in new_pending:
+            if prop.id not in chosen_ids and prop.status == ProposalStatus.PENDING:
+                self.decide(prop.id, False)
+        return AgentResponse(
+            message=(
+                headline
+                + ":\n"
+                + "\n".join(done)
+                + "\n\nEvery action cleared the guardrails "
+                "and is in the audit trail. Switch to Manual to go back to approving each step."
+            ),
+            intent="de_risk",
+            state=self.snapshot(),
+        )
+
+    async def auto_protect_scan(self) -> list[AgentResponse]:
+        """Proactive guardian sweep — the reason automatic mode exists.
+
+        While automatic mode is active (consent given), this runs on the server
+        timer and acts *without any prompt*: any position that slips into the
+        danger zone is de-risked straight to the configured headroom. Manual
+        mode returns immediately; the chat-driven "protect my positions" path
+        stays for humans who want to trigger the same scan themselves.
+
+        Retries are throttled per symbol so a blocked attempt (e.g. daily cap or
+        no cash) can never spam the audit trail every sweep.
+        """
+        if not self._auto_active():
+            return []
+        try:
+            await self.refresh()
+        except Exception:
+            return []
+        state = self.account()
+        now = utcnow()
+        responses: list[AgentResponse] = []
+        for pos in state.futures_positions:
+            if pos.risk.value != "DANGER":
+                continue
+            sym = pos.symbol
+            last = self._auto_risk_attempt.get(sym)
+            if last is not None and (now - last).total_seconds() < self._auto_risk_retry_s:
+                continue
+            if any(
+                pp.symbol == sym and pp.status == ProposalStatus.PENDING
+                for pp in self.proposals.values()
+            ):
+                continue
+            self._auto_risk_attempt[sym] = now
+            before = set(self.proposals)
+            self._propose_de_risk_for(pos, state)
+            new_pending = [
+                p
+                for p in self.proposals.values()
+                if p.id not in before and p.status == ProposalStatus.PENDING
+            ]
+            if not new_pending:
+                continue  # every option was blocked; reasons are already audited
+            self.log(
+                AuditLevel.ACTION,
+                "auto_protect_scan",
+                f"{sym} entered the danger zone ({pos.distance_pct * 100:.1f}% from liq) — "
+                f"auto de-risk engaged",
+            )
+            responses.append(
+                self._auto_exec_de_risk(
+                    new_pending,
+                    event="auto_de_risk",
+                    headline=(
+                        "⚡ Guardian auto-protect — "
+                        + sym
+                        + " reached the danger zone and was de-risked without waiting for approval"
+                    ),
+                )
+            )
+        return responses
 
     def _propose_de_risk_for(
         self, pos: FuturesPosition, state: AccountState
@@ -1287,15 +1416,13 @@ class Orchestrator:
         g = self.guardrails
         if state is None:
             state = self.account()
-        # auto-expire a stale 24h lock whenever the status is read
+        # auto-expire a stale 24h lock whenever the status is read; the
+        # profile values persist — only the lock releases.
         if g.daily_trades_locked and g.daily_lock_at:
             if (datetime.now(timezone.utc) - g.daily_lock_at).total_seconds() >= 86400:
                 g.daily_trades_locked = False
                 g.daily_lock_at = None
-                try:
-                    self._lock_path().unlink(missing_ok=True)
-                except Exception:
-                    pass
+                self._save_guardrail_lock()
         window_start = state.daily_window_start
         remaining = 0.0
         if window_start:
@@ -1336,69 +1463,130 @@ class Orchestrator:
         }
 
     def update_guardrails(self, updates: dict[str, Any]) -> AgentResponse:
-        """Update guardrail values.
+        """Update the runtime-editable risk profile.
 
-        The daily trade cap can be *locked*: once locked it stays locked until
-        the 24-hour window has fully elapsed — there is no early unlock, by
-        design, because the whole point is a commitment you can't talk yourself
-        out of. (A stale lock is auto-expired when read after its 24h.)
+        Locking engages a *profile* lock: every editable limit freezes for one
+        24-hour window. While locked:
+          - loosening any limit is refused — that is the commitment,
+          - tightening any limit is still allowed (risk-reducing is always
+            safe),
+          - there is no early unlock, by design.
+        The whole profile (values + lock) persists across restarts; a finished
+        lock releases itself automatically.
         """
         g = self.guardrails
         gstate = self.guardrail_status()
+        changed: list[str] = []
+        refused: list[str] = []
 
+        # --- lock engagement / early-unlock requests -----------------------
         if gstate["locked"] and "daily_trades_locked" in updates:
             want_lock = bool(updates["daily_trades_locked"])
             if want_lock:
                 return AgentResponse(
-                    message="🔒 The daily trade budget is already locked for this 24-hour window. "
+                    message="🔒 Your risk profile is already locked for this 24-hour window. "
                     "It releases automatically when the window ends.",
                     intent="guardrails",
                     state=self.snapshot(),
                 )
             return AgentResponse(
-                message="🔒 The daily trade budget is locked for this 24-hour window and cannot be "
-                "unlocked early — that lock is the whole point. It releases automatically "
-                "when the window ends.",
-                intent="guardrails",
-                state=self.snapshot(),
-            )
-        if gstate["locked"] and "max_daily_trades" in updates:
-            return AgentResponse(
-                message="🔒 Daily trade budget is locked for this 24-hour window — the cap and the "
-                "lock release together when the window ends.",
+                message="🔒 The risk profile is locked for this 24-hour window and cannot be "
+                "unlocked early — that lock is the whole point. Tightening any limit "
+                "is still allowed; loosening waits until the window ends.",
                 intent="guardrails",
                 state=self.snapshot(),
             )
 
-        changed = []
-        numeric_keys = [
-            "liq_warn_pct",
-            "liq_danger_pct",
-            "liq_target_dist_pct",
-            "max_trade_pct",
-            "min_trade_value_usdt",
-            "cooldown_seconds",
-            "max_daily_trades",
-            "max_leverage",
-        ]
-        for k in numeric_keys:
-            if k in updates:
+        # --- numeric profile limits ----------------------------------------
+        for k in EDITABLE_RAIL_KEYS:
+            if k not in updates:
+                continue
+            try:
                 val = float(updates[k])
-                setattr(g, k, val)
-                changed.append(f"{k}={val}")
-        if "daily_trades_locked" in updates and bool(updates["daily_trades_locked"]):
-            if not gstate["locked"]:
-                g.daily_trades_locked = True
-                g.daily_lock_at = datetime.now(timezone.utc)
-                changed.append("daily budget LOCKED for 24h")
-                self._save_guardrail_lock()
-        self.log(AuditLevel.ACTION, "guardrails_updated", ", ".join(changed))
+            except (TypeError, ValueError):
+                refused.append(f"{k}: {updates[k]!r} is not a number")
+                continue
+            if not math.isfinite(val):
+                refused.append(f"{k}: {val} is not a finite number")
+                continue
+            lo, hi = RAIL_BOUNDS.get(k, (float("-inf"), float("inf")))
+            if not (lo <= val <= hi):
+                if math.isfinite(hi):
+                    refused.append(
+                        f"{k}: {self._fmt_val(k, val)} must stay within "
+                        f"{self._fmt_val(k, lo)} – {self._fmt_val(k, hi)}"
+                    )
+                else:
+                    refused.append(
+                        f"{k}: {self._fmt_val(k, val)} must be >= {self._fmt_val(k, lo)}"
+                    )
+                continue
+            if k == "max_daily_trades":
+                val = round(val)
+            cur = getattr(g, k)
+            if gstate["locked"]:
+                direction = LOOSEN_DIRECTION.get(k, 0)
+                loosens = (direction > 0 and val > cur) or (
+                    direction < 0 and val < cur
+                )
+                if loosens:
+                    refused.append(
+                        f"{k}: {self._fmt_val(k, val)} loosens the locked value of "
+                        f"{self._fmt_val(k, cur)}"
+                    )
+                    continue
+            if abs(val - float(cur)) < 1e-12:
+                continue  # no-op edit
+            setattr(g, k, val)
+            changed.append(f"{k}={self._fmt_val(k, val)}")
+
+        # --- symbol allowlist (hygiene, not a ratcheted risk ceiling) ------
+        if isinstance(updates.get("symbol_allowlist"), list):
+            clean = [
+                str(s).strip().upper()
+                for s in updates["symbol_allowlist"]
+                if str(s).strip()
+            ]
+            if clean != list(g.symbol_allowlist):
+                g.symbol_allowlist = clean
+                changed.append("symbol_allowlist=…")
+
+        # --- engage the lock ----------------------------------------------
+        if updates.get("daily_trades_locked") and not gstate["locked"]:
+            g.daily_trades_locked = True
+            g.daily_lock_at = datetime.now(timezone.utc)
+            changed.append("risk profile LOCKED for 24h")
+
+        if changed:
+            self._save_guardrail_lock()
+            self.log(AuditLevel.ACTION, "guardrails_updated", ", ".join(changed))
+
+        parts: list[str] = []
+        if changed:
+            parts.append("✅ " + ", ".join(changed))
+        if refused:
+            parts.append(
+                "🔒 Refused "
+                + str(len(refused))
+                + " edit(s) while locked: "
+                + "; ".join(refused)
+            )
         return AgentResponse(
-            message="✅ Guardrails updated: "
-            + (", ".join(changed) if changed else "no changes"),
+            message="\n".join(parts) if parts else "No changes.",
             intent="guardrails",
             state=self.snapshot(),
         )
+
+    @staticmethod
+    def _fmt_val(key: str, v: float) -> str:
+        """Human-friendly formatting for a guardrail value (messages/audit)."""
+        if key.endswith("_pct"):
+            return f"{v * 100:g}%"
+        if key == "cooldown_seconds":
+            return f"{v:g}s"
+        if key == "max_leverage":
+            return f"{v:g}x"
+        return f"{v:g}"
 
     # ---------------------------------------------------------------- helpers
     @staticmethod

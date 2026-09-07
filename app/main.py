@@ -49,14 +49,17 @@ def create_app() -> FastAPI:
     async def lifespan(_app: FastAPI):
         async def autopilot() -> None:
             """Background guard sweep: fires armed TP/SL levels (auto-close, the
-            user pre-authorized the exit when they armed it) and evaluates armed
-            price conditions (which queue proposals for approval)."""
+            user pre-authorized the exit when they armed it), evaluates armed
+            price conditions (which queue proposals for approval), and — when
+            automatic mode is consented — watches open positions and de-risks
+            any that slip into the danger zone, with no prompt required."""
             while True:
                 try:
                     await asyncio.sleep(2.0)
                     if orch.conditions:
                         await orch.check_conditions()
                     await orch.scan_tp_sl()
+                    await orch.auto_protect_scan()
                 except asyncio.CancelledError:
                     raise
                 except Exception:

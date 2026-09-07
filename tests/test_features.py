@@ -208,19 +208,21 @@ def test_daily_budget_lock_is_irreversible_until_window(stack):
     assert gs["locked"] is True
     assert gs["lock_remaining_seconds"] > 0
 
-    # cannot raise the cap while locked
+    # cannot raise the cap while locked (loosening refused)
     blocked = orch.update_guardrails({"max_daily_trades": 99})
     assert "locked" in blocked.message.lower()
+    assert orch.guardrails.max_daily_trades == 2
     # cannot unlock early
     blocked2 = orch.update_guardrails({"daily_trades_locked": False})
     assert "locked" in blocked2.message.lower()
     assert orch.guardrails.max_daily_trades == 2
     assert orch.guardrail_status()["locked"] is True
 
-    # other guardrail keys remain editable while the budget is locked
+    # a tightening edit is still allowed while locked (one-way ratchet):
+    # raising the watch zone (earlier warning) is risk-reducing, so it passes
     ok = orch.update_guardrails({"liq_warn_pct": 0.14})
-    assert "updated" in ok.message.lower()
     assert orch.guardrails.liq_warn_pct == pytest.approx(0.14)
+    assert orch.guardrail_status()["locked"] is True  # still locked
 
     # a 24h-old lock auto-expires on the next status read
     assert orch.guardrails.daily_lock_at is not None
@@ -228,7 +230,7 @@ def test_daily_budget_lock_is_irreversible_until_window(stack):
     assert orch.guardrail_status()["locked"] is False
     changed = orch.update_guardrails({"max_daily_trades": 7})
     assert orch.guardrails.max_daily_trades == 7
-    assert "updated" in changed.message.lower()
+    assert changed.message.startswith("✅")
 
     # a fresh 24h window rolls the daily counter back to zero
     _open_long(orch)
@@ -350,3 +352,140 @@ def test_guardrail_lock_persists_across_restart(stack, tmp_path):
     assert orch2.guardrail_status()["locked"] is False
     ok = orch2.update_guardrails({"max_daily_trades": 9})
     assert g2.max_daily_trades == 9
+
+
+# ---------------------------------------------------------------------------
+# Profile commitment lock (one-way ratchet) + proactive auto guardian
+# ---------------------------------------------------------------------------
+
+
+def _lock_profile(orch):
+    resp = orch.update_guardrails({"daily_trades_locked": True})
+    assert orch.guardrail_status()["locked"] is True, resp.message
+    return resp
+
+
+def test_locked_profile_refuses_loosening_but_allows_tightening(stack):
+    """While the profile is locked, loosening any risk limit is refused but
+    tightening (risk-reducing) every limit is still allowed."""
+    orch, market, sim = stack
+    g = orch.guardrails
+    _lock_profile(orch)
+
+    # (value that loosens, value that tightens) per ratcheted key
+    loosening_and_tightening = {
+        "max_daily_trades": (20, 3),
+        "max_leverage": (100.0, 20.0),
+        "max_trade_pct": (0.20, 0.05),
+        "cooldown_seconds": (60.0, 7200.0),
+        "liq_warn_pct": (0.05, 0.15),
+        "liq_danger_pct": (0.03, 0.12),
+        "liq_target_dist_pct": (0.05, 0.25),
+    }
+    for key, (loose, tight) in loosening_and_tightening.items():
+        current = getattr(g, key)
+        blocked = orch.update_guardrails({key: loose})
+        assert "locked" in blocked.message.lower(), (key, blocked.message)
+        assert getattr(g, key) == current, key  # value must not move
+        ok = orch.update_guardrails({key: tight})
+        assert getattr(g, key) == pytest.approx(tight), (key, ok.message)
+        assert orch.guardrail_status()["locked"] is True, key  # still locked
+
+    # min trade value is a dust filter, not a risk ceiling: both directions pass
+    orch.update_guardrails({"min_trade_value_usdt": 0.0})
+    assert g.min_trade_value_usdt == 0.0
+    orch.update_guardrails({"min_trade_value_usdt": 25.0})
+    assert g.min_trade_value_usdt == 25.0
+    assert orch.guardrail_status()["locked"] is True
+
+
+def test_locked_profile_rejects_invalid_values(stack):
+    orch, market, sim = stack
+    _lock_profile(orch)
+    bad = orch.update_guardrails({"max_leverage": 9999.0})
+    assert "must stay within" in bad.message
+    assert orch.guardrails.max_leverage == 50.0
+    nan = orch.update_guardrails({"liq_danger_pct": float("nan")})
+    assert "not a finite number" in nan.message
+
+
+def test_profile_values_persist_across_restart(stack, tmp_path):
+    """Edits survive a restart even without a lock (env defaults no longer win)."""
+    orch, market, sim = stack
+    orch.update_guardrails({"liq_danger_pct": 0.05, "max_leverage": 25.0, "cooldown_seconds": 1800.0})
+
+    from app.agent.orchestrator import Orchestrator
+    from app.config import GuardrailConfig
+
+    g2 = GuardrailConfig()  # fresh env defaults (liq_danger 0.06, lev 50, cooldown 3600)
+    orch2 = Orchestrator(orch.config, g2, sim, market)
+    assert g2.liq_danger_pct == pytest.approx(0.05)
+    assert g2.max_leverage == pytest.approx(25.0)
+    assert g2.cooldown_seconds == pytest.approx(1800.0)
+    assert orch2.guardrail_status()["locked"] is False
+
+
+def _open_danger_long(orch):
+    """Open a LONG that lands squarely in the danger zone (~5% from liq)."""
+    opened = run(orch.queue_open("BTCUSDT", "LONG", 600.0, 20.0))
+    orch.decide(opened.proposals[0]["id"], True)
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.risk.value == "DANGER"
+    return pos
+
+
+def test_auto_protect_scan_does_nothing_in_manual_mode(stack):
+    orch, market, sim = stack
+    _open_danger_long(orch)
+    assert orch.agent_mode == "manual"
+    responses = run(orch.auto_protect_scan())
+    assert responses == []
+    # position untouched, nothing queued
+    assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+
+
+def test_auto_protect_scan_derisks_danger_without_prompt(stack):
+    """The core proactive behavior: automatic mode de-risks a position that
+    slips into the danger zone with nobody asking it to."""
+    orch, market, sim = stack
+    pos = _open_danger_long(orch)
+    quantity_before = pos.quantity
+    orch.set_agent_mode("auto", consent=True)
+
+    responses = run(orch.auto_protect_scan())
+    assert responses, "guardian must act on a DANGER position by itself"
+    assert any(a.event == "auto_protect_scan" for a in orch.audit)
+    assert any(a.event == "auto_de_risk" for a in orch.audit)
+    assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    healed = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert healed.quantity < quantity_before          # reduced, not margin-added
+    assert healed.risk.value != "DANGER"              # back to safe headroom
+
+
+def test_auto_protect_scan_throttles_repeat_attempts(stack):
+    """A blocked attempt (daily cap reached) must not retry every sweep."""
+    orch, market, sim = stack
+    orch.update_guardrails({"max_daily_trades": 1})  # cap consumed by the open below
+    _open_danger_long(orch)                           # trade_count_today becomes 1
+    assert orch.account().trade_count_today == 1
+    orch.set_agent_mode("auto", consent=True)
+
+    run(orch.auto_protect_scan())                     # blocked: reduce + add-margin both refused
+    blocked_first = [a for a in orch.audit if a.event == "de_risk_blocked"]
+    assert blocked_first and all("cap" in a.detail for a in blocked_first)
+    run(orch.auto_protect_scan())                     # immediately again → throttled
+    blocked_second = [a for a in orch.audit if a.event == "de_risk_blocked"]
+    assert len(blocked_second) == len(blocked_first), \
+        "second attempt must be throttled, not re-logged"
+
+
+def test_proactive_guardian_respects_lock_out_of_the_box(stack):
+    """Auto-protect never skips the guardrails; a locked budget cap still holds."""
+    orch, market, sim = stack
+    orch.update_guardrails({"max_daily_trades": 1})
+    _open_danger_long(orch)
+    orch.set_agent_mode("auto", consent=True)
+    run(orch.auto_protect_scan())
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.quantity == pytest.approx(12000.0 / 1000.0)  # untouched
+    assert any(a.event == "de_risk_blocked" for a in orch.audit)

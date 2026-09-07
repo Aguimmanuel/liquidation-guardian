@@ -13,6 +13,53 @@ from datetime import datetime
 from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
+# Runtime-editable guardrail profile
+# ---------------------------------------------------------------------------
+
+# The numeric limits a user can edit from the UI/API and that are persisted
+# with the profile (survive restarts).
+EDITABLE_RAIL_KEYS: tuple[str, ...] = (
+    "liq_warn_pct",
+    "liq_danger_pct",
+    "liq_target_dist_pct",
+    "max_trade_pct",
+    "min_trade_value_usdt",
+    "cooldown_seconds",
+    "max_daily_trades",
+    "max_leverage",
+)
+
+# One-way ratchet: for each editable limit, which direction of change is a
+# *loosening* (blocked while the profile is locked):
+#   +1  -> increasing the value loosens the limit
+#   -1  -> decreasing the value loosens the limit
+#    0  -> not a risk ceiling (either direction allowed while locked)
+LOOSEN_DIRECTION: dict[str, int] = {
+    "max_daily_trades": +1,     # more trades allowed = looser
+    "max_leverage": +1,         # more leverage = looser
+    "max_trade_pct": +1,        # bigger orders = looser
+    "min_trade_value_usdt": 0,  # dust filter — not a risk ceiling
+    "cooldown_seconds": -1,     # shorter gap between auto actions = looser
+    "liq_warn_pct": -1,         # later warning = looser
+    "liq_danger_pct": -1,       # later intervention = looser
+    "liq_target_dist_pct": -1,  # less post-de-risk headroom = looser
+}
+
+# Numeric sanity bounds applied on every guardrail edit (kept in one place so
+# a locked profile can still never be driven into a nonsense value).
+RAIL_BOUNDS: dict[str, tuple[float, float]] = {
+    "liq_warn_pct": (0.0, 1.0),
+    "liq_danger_pct": (0.0, 1.0),
+    "liq_target_dist_pct": (0.0, 1.0),
+    "max_trade_pct": (0.0, 1.0),
+    "min_trade_value_usdt": (0.0, float("inf")),
+    "cooldown_seconds": (0.0, float("inf")),
+    "max_daily_trades": (1.0, float("inf")),
+    "max_leverage": (1.0, 125.0),  # Binance USDⓈ-M hard max
+}
+
+
+# ---------------------------------------------------------------------------
 # Guardrails: hard limits the agent can never cross, mirroring the philosophy
 # of Binance Agent OS (sub-account isolation, no withdrawals, confirm-first).
 # ---------------------------------------------------------------------------
@@ -45,7 +92,12 @@ class GuardrailConfig:
     fee_rate: float = 0.001  # simulated taker fee (0.1%), Binance spot
     # -- runtime-editable guardrail state (set from the UI) --
     max_leverage: float = 50.0  # cap when opening a position (UI enforces <= this)
-    daily_trades_locked: bool = False  # user "locked" today's budget for 24h
+    # The commitment lock. When engaged it freezes the entire editable risk
+    # profile (not just the daily cap) for one 24-hour window: loosening any
+    # limit is refused until the window ends, tightening is always allowed,
+    # and there is no early unlock. Persisted (values + lock) in
+    # guardrail_state.json.
+    daily_trades_locked: bool = False
     daily_lock_at: Optional[datetime] = None
     mcp_url: str = "https://agent.binance.com/mcp/agentic"
     mcp_access_token: str = ""  # optional pre-issued Bearer token

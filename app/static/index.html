@@ -377,7 +377,7 @@
 
 <div id="autoBanner">
   <b>⚡ AUTOMATIC AGENT</b>
-  <span>I can act on your behalf — de-risk, add margin, close positions and run your armed conditions without waiting. Guardrails still apply, but agents can make mistakes.</span>
+  <span>I watch your open positions around the clock. When one slips toward liquidation I de-risk it on my own — no prompt needed — and I also add margin, close positions and run your armed conditions without waiting. Guardrails still apply, but agents can make mistakes.</span>
   <button class="btn sm red" id="btnToManual">Back to Manual</button>
 </div>
 
@@ -502,13 +502,13 @@
     <h3>⚡ Enable automatic agent?</h3>
     <p>In <b>Manual mode</b> (current) every action the guardian proposes waits here for your approval. In <b>Automatic mode</b> the agent can act on your behalf without asking each time:</p>
     <ul style="font-size:13px;color:var(--mut);margin-left:18px;line-height:1.7">
-      <li>de-risk positions approaching liquidation</li>
+      <li>watch your open positions continuously and de-risk any that enter the danger zone — even if you never ask</li>
       <li>add margin or close positions to protect capital</li>
       <li>execute the price conditions you arm</li>
       <li>execute the trades you submit from the Trade panel</li>
     </ul>
     <div class="warnbox">⚠️ <b>Note that when using the automatic agent, agents can make mistakes.</b><br>
-      Guardrails still apply, but they can't guarantee profit or prevent losses. Switch back to Manual at any time.</div>
+      Guardrails still apply, but they can't guarantee profit or prevent losses. The guardian never opens new positions on its own — it only executes what you submit or arm. Switch back to Manual at any time.</div>
     <div class="acts">
       <button class="btn" onclick="closeAutoModal()">Decline</button>
       <button class="btn primary" id="btnAcceptAuto">I understand — enable automatic</button>
@@ -933,6 +933,34 @@ const RAIL_KEYS=[
 ];
 function pctToInput(v){ return +(Math.round(v*1000)/10).toFixed(1); }
 function inputToRail(k,v){ return k.endsWith("_pct")? (v/100) : v; }
+/* One-way ratchet while the profile is locked: which direction of change is a
+   *loosening* (blocked until the 24h window releases). Mirrors the backend. */
+const LOOSEN_DIR={
+  max_daily_trades:1, max_leverage:1, max_trade_pct:1,
+  min_trade_value_usdt:0,                       // dust filter — not a risk ceiling
+  cooldown_seconds:-1, liq_warn_pct:-1, liq_danger_pct:-1, liq_target_dist_pct:-1,
+};
+function curRail(key){
+  const gs=(S&&S.guardrail_status)||{}; const vals=gs.values||{};
+  if(vals[key]!==undefined) return vals[key];
+  return (S&&S.guardrails)?S.guardrails[key]:undefined;
+}
+function railToShown(k,v){
+  if(v===undefined||v===null) return "";
+  if(k.endsWith("_pct")) return pctToInput(v);
+  if(k==="max_daily_trades") return Math.round(v);
+  return v;
+}
+function isLoosening(key,newVal){
+  const dir=LOOSEN_DIR[key]; if(!dir) return false;
+  const cur=curRail(key);
+  if(typeof cur!=="number") return false;
+  return (dir>0&&newVal>cur)||(dir<0&&newVal<cur);
+}
+function lockRemainingLabel(gs){
+  const rem=(gs&&gs.lock_remaining_seconds!==undefined)?gs.lock_remaining_seconds:0;
+  return Math.floor(rem/3600)+"h "+String(Math.floor(rem%3600/60)).padStart(2,"0")+"m";
+}
 function buildRails(){
   const gs=(S&&S.guardrail_status)||{};
   const vals=gs.values||{};
@@ -951,12 +979,12 @@ function buildRails(){
         <span class="used" id="budUsed">—</span><span id="budLockTag"></span>
         <span style="margin-left:auto">
           <input id="in-cap" type="number" min="1" step="1" value="${(vals.max_daily_trades!==undefined?vals.max_daily_trades:(S?S.guardrails.max_daily_trades:10))}">
-          <button class="btn sm amb" id="btnLockBudget" style="margin-left:6px">🔒 Lock for 24h</button>
+          <button class="btn sm amb" id="btnLockBudget" style="margin-left:6px">🔒 Lock profile 24h</button>
         </span></div>
       <div class="bar"><div id="budBar" style="width:0%"></div></div>
       <div class="cnt" id="budCnt"></div>
     </div>`+
-    '<div class="gr-note">Edits apply instantly for this session. Locking the daily budget is a commitment: once locked it stays locked until the 24h window completes — there is no early unlock, by design.</div>';
+    '<div class="gr-note">Edits apply instantly and persist across restarts. <b>Lock profile</b> commits every limit for 24 hours: while locked you can still make any limit stricter, but loosening is refused and there is no early unlock — by design.</div>';
   RAIL_KEYS.forEach(([k])=>{
     const el=$("in-"+k);
     if(el) el.addEventListener("change",()=>saveRail(k));
@@ -971,16 +999,26 @@ function saveRail(key){
   const raw=parseFloat(el.value);
   if(isNaN(raw)) return;
   const val=inputToRail(key,raw);
+  const gs=(S&&S.guardrail_status)||{};
+  // while the profile is locked, refuse a loosening edit locally (the server
+  // enforces the same rule for chat/API callers — this just gives instant UX)
+  if(gs.locked&&isLoosening(key,val)){
+    el.value=railToShown(key,curRail(key));       // snap back to the locked value
+    toast("Profile locked","That change would loosen a locked limit. You can still make any limit stricter; loosening unlocks in "+lockRemainingLabel(gs)+".","warn");
+    return;
+  }
   clearTimeout(railTimers[key]);
   railTimers[key]=setTimeout(async()=>{
     try{
       const r=await api("/api/guardrails",{method:"POST",body:JSON.stringify({values:{[key]:val}})});
       if(r.state) S=r.state;
       const re=$("re-"+key); if(re){ re.classList.add("saved"); setTimeout(()=>re.classList.remove("saved"),900); }
-      const gs=S.guardrail_status||{};
-      if(!gs.locked&&key==="max_daily_trades"&&$("in-cap"))$("in-cap").value=gs.values.max_daily_trades;
       refreshGuardrailReadouts();
-    }catch(e){ errToast(e.message); }
+    }catch(e){
+      errToast(e.message);
+      if(el) el.blur();                            // drop focus so readouts re-sync
+      try{ await refreshState(); }catch(_err){}
+    }
   },450);
 }
 async function lockBudget(){
@@ -1005,7 +1043,8 @@ function refreshGuardrailReadouts(){
   if(capEl){
     const cap=vals.max_daily_trades!==undefined?vals.max_daily_trades:g.max_daily_trades;
     if(!focusedInside("#railsRoot")&&String(capEl.value)!==String(cap)) capEl.value=cap;
-    capEl.disabled=!!gs.locked;
+    // tightening stays editable while locked (the one-way ratchet refuses
+    // loosening in saveRail); the server enforces the same rule
   }
   const b=gs.budget;
   if(b){
@@ -1015,13 +1054,15 @@ function refreshGuardrailReadouts(){
     const rem=gs.lock_remaining_seconds!==undefined?gs.lock_remaining_seconds:(b.window_remaining_seconds||0);
     const hh=Math.floor(rem/3600),mm=Math.floor(rem%3600/60),ss=rem%60;
     const hms=[hh,mm,ss].map(x=>String(x).padStart(2,"0")).join(":");
-    $("budLockTag").innerHTML=gs.locked?`<span class="chip-badge locked">🔒 locked</span>`:"";
+    $("budLockTag").innerHTML=gs.locked?`<span class="chip-badge locked">🔒 profile locked</span>`:"";
     $("budCnt").textContent=gs.locked
-      ?("Budget locked. Releases automatically in "+hms+". No early unlock.")
-      :("Window resets in "+hms+". Lock it when you want to commit for 24h.");
+      ?("Risk profile locked. Loosening refused until release in "+hms+". Tightening a limit is still allowed.")
+      :("Window resets in "+hms+". Lock the whole profile when you want to commit for 24h.");
     $("btnLockBudget").style.display=gs.locked?"none":"";
   }
-  $("railsNote").innerHTML=gs.locked?'<span style="color:var(--amb)">🔒 budget locked</span>':"editable";
+  $("railsNote").innerHTML=gs.locked
+    ?'<span style="color:var(--amb)">🔒 locked · tightening only · '+lockRemainingLabel(gs)+'</span>'
+    :"editable";
 }
 
 /* ---------------- conditions ---------------- */
@@ -1052,6 +1093,7 @@ const SPOKEN={
   tp_sl_fired:"🎯 tp/sl fired", tp_sl_execution_error:"❌ tp/sl error", execution_error:"❌ execution error",
   condition_fired:"🚨 condition fired", condition_blocked:"⛔ condition blocked",
   de_risk_proposed:"🛡️ de-risk proposed", de_risk_blocked:"⛔ de-risk blocked",
+  auto_protect_scan:"🔭 auto-protect scan", auto_de_risk:"🛡️ auto de-risk",
   execution_rejected:"⚠️ declined", auto_mode:"⚡ automatic action",
   agent_mode_auto:"⚡ auto mode on", agent_mode_manual:"🧭 manual mode",
 };
