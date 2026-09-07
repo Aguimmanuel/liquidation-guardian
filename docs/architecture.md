@@ -190,7 +190,7 @@ every monitor poll (no approval-queue spam, no auto-mode cash drain). A BUY
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (100 tests, no network —
+`tests/` covers the risk engine and feature surface (101 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
 distance and risk zones, `required_cut`/`required_margin`, `margin_for_target`/
 `releasable_margin`, the guardrail checks, the plain-language console parser,

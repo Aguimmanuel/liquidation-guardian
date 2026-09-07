@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import Optional
 
 from app.adapters.base import OrderResult
+
+def _mmr_at_open(symbol: str, notional: float) -> float:
+    """B22: seed a position's maintenance margin from its entry notional tier
+    (the refresh loop re-derives it from the live mark notional anyway)."""
+    from app.agent.risk import maintenance_mmr
+
+    return maintenance_mmr(symbol, notional)
 from app.config import (
     MAX_LEVERAGE_X,
     MIN_LEVERAGE_X,
@@ -511,7 +518,7 @@ class SimAdapter:
                 quantity=qty,
                 leverage=leverage,
                 margin_usdt=margin,
-                mmr=0.005,
+                mmr=_mmr_at_open(proposal.symbol, price * qty),
                 mark_price=price,
             )
             state.futures_positions.append(fp)

@@ -8,6 +8,7 @@ from app.agent.risk import (
     distance_pct,
     evaluate_position,
     liq_price,
+    maintenance_mmr,
     margin_for_target,
     portfolio_risk_summary,
     position_risk_context,
@@ -57,10 +58,28 @@ def test_distance_and_levels():
 
 def test_evaluate_position_sets_fields():
     pos = make_pos()
-    out = evaluate_position(pos, 66_000.0, 0.10, 0.06)
+    out = evaluate_position(pos, pos.entry_price, 0.10, 0.06)
     assert out.risk == RiskLevel.DANGER  # 20x position sits inside the danger zone
-    assert out.unrealized_pnl_usdt > 0  # mark above entry on a long
+    assert out.unrealized_pnl_usdt == pytest.approx(0.0)  # mark == entry
     assert out.distance_pct > 0
+    assert out.mmr == pytest.approx(0.004)  # BTC tier-1 rate, not the old flat 0.005
+
+
+def test_maintenance_mmr_tiered_by_notional():
+    """B22: maintenance margin climbs with position notional, per symbol."""
+    assert maintenance_mmr("BTCUSDT", 1_000.0) == pytest.approx(0.004)
+    assert maintenance_mmr("BTCUSDT", 49_999.0) == pytest.approx(0.004)
+    assert maintenance_mmr("BTCUSDT", 50_000.0) == pytest.approx(0.004)
+    assert maintenance_mmr("BTCUSDT", 50_001.0) == pytest.approx(0.010)
+    assert maintenance_mmr("BTCUSDT", 1_000_001.0) == pytest.approx(0.050)
+    # ETH tier-1 sits at 0.5%, BNB higher (0.65%) than the BTC base
+    assert maintenance_mmr("ETHUSDT", 1_000.0) == pytest.approx(0.005)
+    assert maintenance_mmr("BNBUSDT", 1_000.0) == pytest.approx(0.0065)
+    assert maintenance_mmr("BNBUSDT", 600_000.0) == pytest.approx(0.050)
+    # unknown symbols keep the flat fallback regardless of size
+    assert maintenance_mmr("DOGEUSDT", 100_000.0) == pytest.approx(0.005)
+    # non-positive notional never looks worse than tier 1
+    assert maintenance_mmr("BTCUSDT", 0.0) == pytest.approx(0.004)
 
 
 def test_required_cut_moves_liq_to_target():

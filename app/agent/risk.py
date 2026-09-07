@@ -26,11 +26,47 @@ With M = entry·qty/leverage this reduces to the familiar
 Fees, funding and cross-margin positions are not modelled; the live adapter
 reads real positions from the Binance MCP account scope. Everything here is
 deterministic and unit-tested.
+
+Maintenance margin (``maintenance_mmr``) is *tiered by notional* per symbol
+(B22): bigger positions carry a higher maintenance-margin rate, exactly like
+the exchange's USDⓈ-M bracket schedule. The table below is a representative
+snapshot of Binance's published brackets (2026) for the four default watch
+symbols — verify against the exchange before live trading, because Binance
+adjusts these from time to time. Unknown symbols fall back to a flat 0.5%.
 """
 
 from __future__ import annotations
 
 from app.models import FuturesPosition, PositionSide, RiskLevel
+
+# B22: maintenance-margin schedule by symbol — (notional_cap_usdt, mmr)
+# tuples ascending; the rate for the tier whose cap covers the position
+# notional applies. Representative Binance USDⓈ-M snapshot, 2026.
+USD_M_MMR_TIERS: dict[str, tuple[tuple[float, float], ...]] = {
+    "BTCUSDT": ((50_000.0, 0.004), (1_000_000.0, 0.010), (float("inf"), 0.050)),
+    "ETHUSDT": ((50_000.0, 0.005), (1_000_000.0, 0.010), (float("inf"), 0.050)),
+    "BNBUSDT": ((50_000.0, 0.0065), (500_000.0, 0.0125), (float("inf"), 0.050)),
+    "SOLUSDT": ((50_000.0, 0.005), (500_000.0, 0.0125), (float("inf"), 0.050)),
+}
+FALLBACK_MMR = 0.005  # unknown symbols keep the flat 0.5% default
+
+
+def maintenance_mmr(symbol: str, notional_usdt: float) -> float:
+    """Maintenance-margin rate for ``symbol`` at the given position notional.
+
+    Tiered by notional (larger position → higher maintenance rate). Unknown
+    symbols fall back to the flat default. ``notional`` <= 0 returns the
+    smallest (tier-1) rate so a fresh or empty position never looks worse.
+    """
+    tiers = USD_M_MMR_TIERS.get(symbol)
+    if not tiers:
+        return FALLBACK_MMR
+    if notional_usdt <= 0:
+        return tiers[0][1]
+    for cap, mmr in tiers:
+        if notional_usdt <= cap:
+            return mmr
+    return tiers[-1][1]
 
 
 def liq_price(
@@ -73,6 +109,10 @@ def evaluate_position(
 ) -> FuturesPosition:
     """Refresh a position's derived risk fields from a live mark price."""
     pos.mark_price = mark_price
+    # B22: maintenance margin is tiered by notional — recompute the rate from
+    # the current mark notional so a bigger/repriced position is protected
+    # with the maintenance margin the exchange would actually require.
+    pos.mmr = maintenance_mmr(pos.symbol, mark_price * pos.quantity)
     pos.liq_price = liq_price(
         pos.side, pos.entry_price, pos.quantity, pos.margin_usdt, pos.mmr
     )

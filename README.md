@@ -1,11 +1,20 @@
 # Liquidation Guardian
 
-A focused AI risk agent for [Binance Agent OS](https://www.binance.com/en/agent-os):
-it watches open USDⓈ-M futures positions against live market data, computes the
-real distance to each position's liquidation price, and proposes guardrailed
-de-risk actions — reduce leverage or add margin — before the exchange
-liquidates you. Intentionally narrow: a capital-protection agent for leveraged
-futures, not a general-purpose trading bot.
+A focused AI risk agent for USDⓈ-M futures protection: it watches open
+positions against live market data, computes the real distance to each
+position's liquidation price, and proposes guardrailed de-risk actions —
+reduce leverage or add margin — before the exchange liquidates you.
+Intentionally narrow: a capital-protection agent for leveraged futures, not a
+general-purpose trading bot.
+
+**Honest about its AI:** every decision is made by a deterministic, guardrailed
+engine (no model dependency), so protection works even with no LLM configured.
+The optional LLM layer only narrates and parses free-text console commands.
+In live mode this console drives the real Binance Agent OS **MCP server**
+(`agent.binance.com/mcp/agentic`) as its execution channel — Binance's Agentic
+sub-account isolation and confirm-before-execute still apply to every order.
+This repo is the console and the risk brain; it is not the Agent OS product
+itself.
 
 ## What this agent does
 
@@ -19,8 +28,9 @@ positions from liquidation risk.
   proposes the two standard protection paths: reduce exposure or add margin.
 - **Applies guardrails before action.** Every action is checked against the
   symbol allowlist and cash/funds sufficiency — with nothing in the way that
-  could freeze a de-risk: no per-day budget, order-size cap, cooldown, dust
-  floor or leverage cap (all retired after proving decorative for protection).
+  could freeze a de-risk: no per-day budget, order-size cap, cooldown or dust
+  floor. Leverage is capped only by Binance's own exchange limit, a
+  hard-coded, non-editable **1x–125x** rule.
 - **An always-on guardian.** It watches every open position around the clock
   in *both* modes, logs risk-zone changes (OK → WATCH → DANGER) as they
   happen, and escalates the moment one reaches the danger zone: in manual
@@ -36,8 +46,8 @@ positions from liquidation risk.
   genuinely change what the guardian does — sanity-bounded and persisted across
   restarts. Everything else that used to look like a control (leverage cap, min
   action value, order-size, cooldown, daily budget) is gone.
-- **Money flows both ways — nothing is trapped.** A funds control under the
-  positions table moves free balance between **spot** and the **futures
+- **Money flows both ways — nothing is trapped.** A **Fund transfer** box in
+  the account bar moves free balance between **spot** and the **futures
   wallet** in either direction, by any amount you type (or all of it with
   `max`). A per-position `↩` releases excess margin off an open position,
   bounded so it keeps its de-risk headroom. Only free balance moves — no open
@@ -51,11 +61,11 @@ positions from liquidation risk.
   becomes an open-ended agent: the model reads your live portfolio context,
   answers questions in plain English, and still routes every action through
   the same guardrailed propose-and-approve pipeline.
-- **Price conditions fire once per crossing, never on a loop.** Arm “if BTC
-  drops below 60,000, add 400 margin” and it triggers exactly once when price
-  crosses, then re-arms only after price returns through the trigger — a coin
-  that stays past the price can't spam the approval queue or drain cash in
-  auto mode.
+- **Price conditions are one-shot.** Arm “if BTC drops below 60,000, add 400
+  margin” and it triggers exactly once when price crosses past the trigger,
+  then closes itself (armed → *fired · closed*) — it never loops, never
+  re-arms, and a coin that stays past the price can't spam the approval queue
+  or drain cash in auto mode. Create a fresh condition for another shot.
 
 This scope is deliberate. The project is not trying to be a broad autonomous
 trading system; it is an AI risk agent for futures protection and staged
@@ -81,8 +91,9 @@ or by hand: `pip install -r requirements.txt`, then
 
 Open http://localhost:8000. The app starts in **sim mode** with a $10,000 paper
 account priced off live Binance market data — no Binance account or credentials
-needed to explore every feature. The identical agent loop runs against the real
-Binance Agent OS when you switch to live (see below).
+needed to explore every feature. Flipping `RS_MODE=live` swaps the paper
+adapter for the real Binance Agent OS MCP execution channel (see below); the
+risk brain, zones and proposal flow are the same.
 
 ## Screenshots
 
@@ -95,8 +106,8 @@ Suggested first run (funding follows the Binance futures model):
 
 1. **Fund the futures wallet first.** A fresh account holds all $10k in spot
    and nothing in the futures wallet. Margin is drawn from the futures wallet —
-   never spot — so use the wallet control at the top right of the **Trade**
-   panel to move some cash from spot → futures (e.g. $2,000). Opening or
+   never spot — so use the **Fund transfer** box in the account bar to move
+   some cash from spot → futures (e.g. $2,000). Opening or
    adding margin before depositing is refused with a clear “deposit from spot
    first” message.
 2. In the **Trade** panel pick BTC and open a Long — say 20x with $600 margin.
@@ -108,7 +119,7 @@ Suggested first run (funding follows the Binance futures model):
 6. Approve the reduce: liquidation jumps from ~4.5% to ~15% headroom. Closing
    a position or releasing margin you no longer need (per-row **↩** button)
    lands USDT back in the futures wallet — move it on to spot with the same
-   wallet control whenever you like.
+   Fund transfer box whenever you like.
 7. Open **Guardrails** and edit a limit — it applies instantly and persists
    across restarts. There's no trade-count budget to babysit; the guardian
    protects any hour of any day.
@@ -142,10 +153,18 @@ The adapter logs the tools and scopes it discovers on startup, so you can
 verify exactly what the live account exposes before placing any order. Start
 with a small amount in the sub-account and work up.
 
+**Live execution subset (be explicit, never guess):** the adapter only sends
+orders that map onto real trades — CLOSE and reduce TRADE orders fill at the
+live quantity. OPEN requires isolated-margin tooling this repo does not expose,
+and fund transfers are free-balance bookkeeping with no Binance order behind
+them, so those proposals are refused with a clear explanation in live mode
+(they work fully in Sim). Consult `app/adapters/mcp_live.py` for the exact
+mapping.
+
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 100 unit tests, no network needed
+python -m pytest tests/ -q            # 101 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```
@@ -191,10 +210,18 @@ Env vars are the boot defaults only. Edits made in the UI are persisted to
 
 ## Notes
 
-- The liquidation math models isolated margin without fees or funding (see
-  `app/agent/risk.py` for the derivation). The live adapter reads real
-  positions from the MCP account scope, so live numbers come from Binance
-  itself.
+- The liquidation math models isolated margin without funding, and models the
+  USDⓈ-M taker fee on the *closed notional* (rate from `futures_fee_rate`).
+  Open legs are intentionally fee-free so the demo funds its wallet in whole
+  amounts; the close fee is the real cost of exiting. See `app/agent/risk.py`
+  and `app/adapters/sim.py`.
+- Maintenance margin is tiered by position notional per symbol, mirroring the
+  exchange's bracket schedule (`USD_M_MMR_TIERS` in `app/agent/risk.py`).
+  The table is a **representative snapshot** of Binance's published brackets
+  (2026) for the four default symbols — verify against the exchange before
+  live trading, since Binance adjusts these from time to time.
+- The live adapter reads real positions from the MCP account scope, so live
+  numbers come from Binance itself.
 - A naive "close part of the position" does *not* move the liquidation price —
   margin is released proportionally. That's why the guardian's reduce keeps the
   released margin on the remainder (deleveraging). The backtest demonstrates
