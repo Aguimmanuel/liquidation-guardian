@@ -489,3 +489,65 @@ def test_proactive_guardian_respects_lock_out_of_the_box(stack):
     pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
     assert pos.quantity == pytest.approx(12000.0 / 1000.0)  # untouched
     assert any(a.event == "de_risk_blocked" for a in orch.audit)
+
+
+def test_monitor_positions_queues_de_risk_plan_in_manual_mode(stack):
+    """Manual mode now escalates on its own: a DANGER position gets a de-risk
+    plan queued (approval still required) without pressing Protect."""
+    orch, market, sim = stack
+    pos = _open_danger_long(orch)
+    qty_before = pos.quantity
+    responses = run(orch.monitor_positions())
+    assert not responses, "manual mode must not execute on its own"
+    pending = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    assert pending, "DANGER must auto-queue a de-risk plan in manual mode"
+    healed = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert healed.quantity == qty_before, "nothing should execute without approval"
+    assert any(a.event == "de_risk_alert" for a in orch.audit)
+    assert any(a.event == "monitor_zone" for a in orch.audit)
+
+
+def test_monitor_positions_executes_in_auto_mode(stack):
+    """Auto mode keeps executing DANGER de-risks, now via the unified monitor."""
+    orch, market, sim = stack
+    orch.set_agent_mode("auto", consent=True)
+    opened = run(orch.queue_open("BTCUSDT", "LONG", 600.0, 20.0))
+    assert not opened.proposals, "auto mode opens immediately"
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.risk.value == "DANGER"
+    qty_before = pos.quantity
+    responses = run(orch.monitor_positions())
+    assert responses, "auto mode must de-risk on its own"
+    healed = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert healed.quantity < qty_before
+    assert any(a.event == "auto_de_risk" for a in orch.audit)
+
+
+def test_monitor_positions_does_not_requeue_while_pending(stack):
+    """A queued-but-undecided plan must not be re-queued every sweep."""
+    orch, market, sim = stack
+    _open_danger_long(orch)
+    run(orch.monitor_positions())
+    n1 = len([p for p in orch.proposals.values() if p.status.value == "PENDING"])
+    alerts1 = len([a for a in orch.audit if a.event == "de_risk_alert"])
+    assert n1 > 0
+    run(orch.monitor_positions())  # immediately again
+    n2 = len([p for p in orch.proposals.values() if p.status.value == "PENDING"])
+    alerts2 = len([a for a in orch.audit if a.event == "de_risk_alert"])
+    assert (n2, alerts2) == (n1, alerts1), "must be throttled while pending"
+
+
+def test_monitor_visibility_watch_logged_ok_silent(stack):
+    """The monitor narrates positions it is watching (WATCH+) and stays quiet
+    on calm OK positions, and never queues anything below DANGER."""
+    orch, market, sim = stack
+    # 10x BTC -> WATCH (~9.5% from liq); 2x ETH -> OK (~49% from liq)
+    b = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))
+    orch.decide(b.proposals[0]["id"], True)
+    e = run(orch.queue_open("ETHUSDT", "LONG", 500.0, 2.0))
+    orch.decide(e.proposals[0]["id"], True)
+    run(orch.monitor_positions())
+    zone_events = [a.detail for a in orch.audit if a.event == "monitor_zone"]
+    assert any("ETHUSDT" not in d and "BTCUSDT" in d and "WATCH" in d for d in zone_events)
+    assert not any("ETHUSDT" in d for d in zone_events), "calm OK positions stay quiet"
+    assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]

@@ -119,10 +119,13 @@ class Orchestrator:
         # auto = the agent may act on its own once the user consents.
         self.agent_mode: str = "manual"
         self.auto_consent: bool = False
-        # per-symbol throttle for the autonomous danger sweep (see
+        # per-symbol throttle for the danger sweep (see monitor_positions /
         # auto_protect_scan) so a blocked retry never spams the audit trail.
         self._auto_risk_attempt: dict[str, datetime] = {}
         self._auto_risk_retry_s: float = 120.0
+        # per-symbol last-known risk zone (OK / WATCH / DANGER) so the always-on
+        # monitor can log every zone change instead of only reacting to DANGER.
+        self._monitor_zone: dict[str, str] = {}
         self._load_guardrail_lock()
 
     # --------------------------------------------- guardrail lock persistence
@@ -531,6 +534,106 @@ class Orchestrator:
             )
         return responses
 
+    async def monitor_positions(self) -> list[AgentResponse]:
+        """Always-on per-position guardian loop — runs in BOTH manual and auto.
+
+        Runs on the server timer while the app is up, so the guardian tracks
+        every open position continuously rather than waiting to be asked:
+
+          - keeps a per-symbol risk-zone map (OK / WATCH / DANGER) and logs a
+            visible event on every zone change (and on first sighting of a
+            non-OK position), so its attention is never silent;
+          - when a position reaches DANGER it responds immediately:
+            manual mode queues a guardrailed de-risk plan for approval, auto
+            mode executes it (reduce-first, no extra capital). Blocked or
+            already-pending positions are throttled per symbol so nothing
+            spams the audit trail.
+        """
+        if not self.account().futures_positions:
+            # nothing open — stay quiet and keep the zone map clean
+            self._monitor_zone.clear()
+            return []
+        try:
+            await self.refresh()
+        except Exception:
+            return []
+        state = self.account()
+        now = utcnow()
+        responses: list[AgentResponse] = []
+        live_symbols = {p.symbol for p in state.futures_positions}
+        # forget positions that have been closed so a future re-entry re-baselines
+        for sym in list(self._monitor_zone):
+            if sym not in live_symbols:
+                self._monitor_zone.pop(sym, None)
+        for pos in state.futures_positions:
+            sym = pos.symbol
+            zone = pos.risk.value
+            prev = self._monitor_zone.get(sym)
+            if prev != zone:
+                if prev is None:
+                    # first sighting: say we're watching it (skip calm OKs)
+                    if zone != "OK":
+                        self.log(
+                            AuditLevel.INFO,
+                            "monitor_zone",
+                            f"{sym} {zone} · {pos.distance_pct * 100:.1f}% from liq — "
+                            f"monitoring active",
+                        )
+                else:
+                    self.log(
+                        AuditLevel.INFO,
+                        "monitor_zone",
+                        f"{sym} {prev}→{zone} · {pos.distance_pct * 100:.1f}% from liq",
+                    )
+                self._monitor_zone[sym] = zone
+
+            if zone != "DANGER":
+                continue
+            last = self._auto_risk_attempt.get(sym)
+            if last is not None and (now - last).total_seconds() < self._auto_risk_retry_s:
+                continue
+            if any(
+                pp.symbol == sym and pp.status == ProposalStatus.PENDING
+                for pp in self.proposals.values()
+            ):
+                continue  # a plan for this symbol is already awaiting the user
+            self._auto_risk_attempt[sym] = now
+            before = set(self.proposals)
+            self._propose_de_risk_for(pos, state)
+            new_pending = [
+                p
+                for p in self.proposals.values()
+                if p.id not in before and p.status == ProposalStatus.PENDING
+            ]
+            if not new_pending:
+                continue  # every option was blocked; reasons are already audited
+            if self._auto_active():
+                self.log(
+                    AuditLevel.ACTION,
+                    "auto_protect_scan",
+                    f"{sym} entered the danger zone ({pos.distance_pct * 100:.1f}% from liq) — "
+                    f"auto de-risk engaged",
+                )
+                responses.append(
+                    self._auto_exec_de_risk(
+                        new_pending,
+                        event="auto_de_risk",
+                        headline=(
+                            "⚡ Guardian auto-protect — "
+                            + sym
+                            + " reached the danger zone and was de-risked without waiting for approval"
+                        ),
+                    )
+                )
+            else:
+                self.log(
+                    AuditLevel.ACTION,
+                    "de_risk_alert",
+                    f"{sym} reached the danger zone ({pos.distance_pct * 100:.1f}% from liq) — "
+                    f"de-risk plan queued for your approval",
+                )
+        return responses
+
     def _propose_de_risk_for(
         self, pos: FuturesPosition, state: AccountState
     ) -> Optional[TradeProposal]:
@@ -840,6 +943,8 @@ class Orchestrator:
         reset()
         self.proposals.clear()
         self.conditions.clear()
+        self._monitor_zone.clear()
+        self._auto_risk_attempt.clear()
         self.log(AuditLevel.ACTION, "reset", "demo account reset")
         return AgentResponse(
             message="♻️ Demo account reset to fresh cash. Ready when you are.",

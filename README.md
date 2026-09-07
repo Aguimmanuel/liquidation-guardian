@@ -19,10 +19,13 @@ positions from liquidation risk.
   proposes the two standard protection paths: reduce exposure or add margin.
 - **Applies guardrails before action.** Every action is checked against size,
   wallet, leverage, cooldown, drawdown, and daily-budget rules.
-- **Keeps the human in the loop.** Default mode waits for explicit approval.
-  Automatic mode watches your open positions around the clock and, when one
-  slips toward liquidation, de-risks it on its own — no prompt needed. It
-  engages only after a clear consent notice and still obeys all guardrails.
+- **An always-on guardian.** It watches every open position around the clock
+  in *both* modes, logs risk-zone changes (OK → WATCH → DANGER) as they
+  happen, and escalates the moment one reaches the danger zone: in manual
+  mode it queues a de-risk plan for your approval; in automatic mode it
+  executes it on its own — no prompt needed. Automatic mode engages only
+  after a clear consent notice and still obeys all guardrails. A header badge
+  shows how many positions it is watching.
 - **Adds contextual analysis when useful.** A per-coin market read can help the
   operator understand trend, support/resistance, and whether risk should be
   reduced or preserved.
@@ -111,7 +114,7 @@ with a small amount in the sub-account and work up.
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 49 unit tests, no network needed
+python -m pytest tests/ -q            # 53 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```

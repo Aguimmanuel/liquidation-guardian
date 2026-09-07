@@ -92,6 +92,11 @@ observe ──► analyze ──► decide ──► narrate ──► approve? 
   prefers the *reduce* — no extra capital — and rejects the unchosen option,
   and retries are throttled per symbol so a blocked attempt can't spam the
   audit trail). Switching back to Manual revokes consent.
+  The same `monitor_positions()` loop runs in *both* modes while positions are
+  open: it tracks each symbol's risk zone and logs zone changes, and on DANGER
+  it queues a de-risk plan in manual mode (approval still required) or
+  executes it in automatic mode — so the guardian escalates without being
+  asked in either mode.
 - **execute** — `SimAdapter` (paper fills at mark price, simulated fees) or
   `MCPLiveAdapter` (Binance MCP server, real sub-account).
 - **audit** — every event appended to an in-memory audit trail, exposed via
@@ -152,7 +157,7 @@ endpoints (`/api/trade/*`, `/api/tpsl`, `/api/guardrails`).
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (49 tests, no network —
+`tests/` covers the risk engine and feature surface (53 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
 distance and risk zones, `required_cut`/`required_margin`, guardrail semantics,
 text parsers, plus feature tests for: dynamic-leverage opens (cap, cash,
