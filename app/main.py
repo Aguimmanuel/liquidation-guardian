@@ -110,6 +110,16 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def no_store(request: Request, call_next):
+        """Never let a browser serve a stale page/state: the UI is rebuilt and
+        the sim state changes constantly, so everything ships uncached."""
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
     @app.get("/", include_in_schema=False)
     async def index():
         return serve_index()

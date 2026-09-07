@@ -109,7 +109,19 @@ def stack(tmp_path):
     return orch, market, sim
 
 
-def _open_long(orch, symbol="BTCUSDT", margin=500.0, leverage=10.0):
+def _fund(orch, amount):
+    """Deposit spot cash into the free futures wallet (Binance model: money
+    must live futures-side before it can be used as margin)."""
+    r = run(orch.transfer_balance("to_futures", amount))
+    assert r.proposals, r.message
+    orch.decide(r.proposals[0]["id"], True)
+
+
+def _open_long(orch, symbol="BTCUSDT", margin=500.0, leverage=10.0, extra_fund=0.0):
+    """Open a futures position the Binance way: fund the futures wallet first
+    (margin + optional extra so later margin adds have free balance), then
+    open. Margin is drawn from the futures wallet, never from spot."""
+    _fund(orch, margin + extra_fund)
     resp = run(orch.queue_open(symbol, "LONG", margin, leverage))
     assert resp.proposals, resp.message
     decided = orch.decide(resp.proposals[0]["id"], True)
@@ -125,7 +137,10 @@ def test_open_approve_executes_long(stack):
     assert pos.side.value == "LONG"
     assert pos.quantity == pytest.approx(5000.0 / 1000.0)     # notional / entry
     assert pos.margin_usdt == pytest.approx(500.0)
-    assert acct.cash_usdt == pytest.approx(9500.0)            # margin taken from spot
+    # 500 deposited to futures first: spot falls by 500, the open spends the
+    # free futures balance (wallet back to 0), NOT spot cash
+    assert acct.cash_usdt == pytest.approx(9500.0)
+    assert acct.futures_wallet_usdt == pytest.approx(0.0)
 
 
 def test_open_dynamic_leverage_matters(stack):
@@ -194,6 +209,7 @@ def test_take_profit_auto_closes_long(stack):
 
 def test_tp_sl_short_side_logic(stack):
     orch, market, sim = stack
+    _fund(orch, 400.0)
     resp = run(orch.queue_open("ETHUSDT", "SHORT", 400.0, 10.0))
     orch.decide(resp.proposals[0]["id"], True)
     orch.set_tp_sl("ETHUSDT", 980.0, 1030.0)  # short: TP below, SL above
@@ -225,15 +241,18 @@ def test_funds_wallet_roundtrip_returns_to_spot(stack):
     assert any(a.event == "return_proposed" for a in orch.audit)
 
 
-def test_release_excess_margin_back_to_spot(stack):
+def test_release_excess_margin_lands_in_futures_wallet(stack):
     """Margin added by a de-risk can be pulled back off an open position once
     it is no longer needed, bounded so the position keeps its de-risk
-    headroom and stays in the OK zone."""
+    headroom and stays in the OK zone. Under the Binance model the released
+    margin returns to the free futures wallet (not spot)."""
     from app.models import TransferKind
 
     orch, market, sim = stack
-    b = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))
-    orch.decide(b.proposals[0]["id"], True)                # WATCH ~9.5% from liq
+    # fund 500 margin + 8000 spare futures balance so the danger top-up has
+    # money to draw from and there is free balance to release into later
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=8000.0)
+    # position opens WATCH (~9.5% from liq)
     # drive the price down so the position lands in DANGER -> monitor queues
     # the two-option de-risk plan (reduce OR add margin)
     market.prices["BTCUSDT"] = 920.0
@@ -252,15 +271,16 @@ def test_release_excess_margin_back_to_spot(stack):
     shown = next(p for p in snap["account"]["futures_positions"] if p["symbol"] == "BTCUSDT")
     assert shown["releasable_margin_usdt"] is not None and shown["releasable_margin_usdt"] > 100.0
 
+    wallet_before = snap["account"]["futures_wallet_usdt"]
     cash_before = snap["account"]["cash_usdt"]
-    ret = run(orch.release_margin_to_spot("BTCUSDT"))
+    ret = run(orch.release_margin_to_wallet("BTCUSDT"))
     assert ret.proposals and ret.proposals[0]["transfer_kind"] == TransferKind.RELEASE_MARGIN.value
     released = ret.proposals[0]["est_value_usdt"]
     orch.decide(ret.proposals[0]["id"], True)
     acct2 = orch.account()
     pos2 = next(p for p in acct2.futures_positions if p.symbol == "BTCUSDT")
-    assert acct2.cash_usdt == pytest.approx(cash_before + released, abs=0.05)
-    assert acct2.futures_wallet_usdt == pytest.approx(0.0)
+    assert acct2.cash_usdt == pytest.approx(cash_before, abs=0.05)   # spot untouched
+    assert acct2.futures_wallet_usdt == pytest.approx(wallet_before + released, abs=0.05)
     assert pos2.risk.value == "OK"                          # still protected
     assert pos2.margin_usdt < margin_after_topup            # some margin came home
     assert any(a.event == "release_proposed" for a in orch.audit)
@@ -272,13 +292,13 @@ def test_release_refused_when_nothing_excess_and_target_misconfigured(stack):
     above the watch zone (it could otherwise push a position into warning)."""
     orch, market, sim = stack
     _open_long(orch, margin=500.0, leverage=10.0)           # WATCH: needs MORE margin
-    ret = run(orch.release_margin_to_spot("BTCUSDT"))
+    ret = run(orch.release_margin_to_wallet("BTCUSDT"))
     assert not ret.proposals
     assert "no excess margin" in ret.message.lower()
     # a nonsense config (target <= watch zone) must suspend releases outright
     _open_long(orch, symbol="ETHUSDT", margin=500.0, leverage=10.0)
     orch.update_guardrails({"liq_target_dist_pct": 0.08})   # below watch 0.10
-    ret2 = run(orch.release_margin_to_spot("ETHUSDT"))
+    ret2 = run(orch.release_margin_to_wallet("ETHUSDT"))
     assert not ret2.proposals
     assert "de-risk target" in ret2.message
 
@@ -323,6 +343,7 @@ def test_market_analysis_prompts_then_reports(stack):
 def test_manual_mode_queues_for_approval(stack):
     orch, market, sim = stack
     assert orch.agent_mode == "manual"
+    _fund(orch, 500.0)                                        # fund futures first
     resp = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))
     assert resp.proposals, "manual mode must queue a proposal"
     assert not orch.account().futures_positions, "nothing should execute before approval"
@@ -338,6 +359,7 @@ def test_auto_mode_requires_consent(stack):
 
 def test_auto_mode_executes_open_without_approval(stack):
     orch, market, sim = stack
+    _fund(orch, 500.0)                                        # fund futures first
     resp = orch.set_agent_mode("auto", consent=True)
     assert orch.agent_mode == "auto"
     assert orch._auto_active()
@@ -355,10 +377,7 @@ def test_auto_mode_executes_open_without_approval(stack):
 
 def test_auto_mode_executes_de_risk_on_danger(stack):
     orch, market, sim = stack
-    opened = run(orch.queue_open("BTCUSDT", "LONG", 600.0, 20.0))
-    orch.decide(opened.proposals[0]["id"], True)
-    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
-    assert pos.risk.value == "DANGER"  # 20x puts liquidation ~5% away
+    pos = _open_danger_long(orch)                             # 20x, funded first
     orch.set_agent_mode("auto", consent=True)
     out = run(orch.handle_message("protect my positions"))
     assert "Automatic mode" in out.message
@@ -417,6 +436,7 @@ def test_profile_values_persist_across_restart(stack, tmp_path):
 
 def _open_danger_long(orch):
     """Open a LONG that lands squarely in the danger zone (~5% from liq)."""
+    _fund(orch, 600.0)                                        # fund futures first
     opened = run(orch.queue_open("BTCUSDT", "LONG", 600.0, 20.0))
     orch.decide(opened.proposals[0]["id"], True)
     pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
@@ -489,6 +509,7 @@ def test_monitor_positions_queues_de_risk_plan_in_manual_mode(stack):
 def test_monitor_positions_executes_in_auto_mode(stack):
     """Auto mode keeps executing DANGER de-risks, now via the unified monitor."""
     orch, market, sim = stack
+    _fund(orch, 600.0)                                    # fund futures first
     orch.set_agent_mode("auto", consent=True)
     opened = run(orch.queue_open("BTCUSDT", "LONG", 600.0, 20.0))
     assert not opened.proposals, "auto mode opens immediately"
@@ -521,10 +542,8 @@ def test_monitor_visibility_watch_logged_ok_silent(stack):
     on calm OK positions, and never queues anything below DANGER."""
     orch, market, sim = stack
     # 10x BTC -> WATCH (~9.5% from liq); 2x ETH -> OK (~49% from liq)
-    b = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))
-    orch.decide(b.proposals[0]["id"], True)
-    e = run(orch.queue_open("ETHUSDT", "LONG", 500.0, 2.0))
-    orch.decide(e.proposals[0]["id"], True)
+    _open_long(orch, symbol="BTCUSDT", margin=500.0, leverage=10.0)
+    _open_long(orch, symbol="ETHUSDT", margin=500.0, leverage=2.0)
     run(orch.monitor_positions())
     zone_events = [a.detail for a in orch.audit if a.event == "monitor_zone"]
     assert any("ETHUSDT" not in d and "BTCUSDT" in d and "WATCH" in d for d in zone_events)
@@ -585,7 +604,9 @@ def test_condition_buy_adds_margin_not_sells(stack):
     margin — never sell quantity of the position, and never be blocked by a
     cooldown right after a trade."""
     orch, market, sim = stack
-    _open_long(orch, margin=500.0, leverage=10.0)          # margin 500, cash 9500
+    # fund 500 margin + 600 spare futures balance (the condition top-up spends
+    # free futures, not spot)
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=600.0)
     pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
     assert pos.quantity == pytest.approx(5.0)
     # arm an add-margin condition and fire it immediately (cooldown must not apply)
@@ -604,7 +625,8 @@ def test_condition_buy_adds_margin_not_sells(stack):
     pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
     assert pos.margin_usdt == pytest.approx(1100.0)        # +600 added
     assert pos.quantity == pytest.approx(5.0)              # quantity untouched
-    assert acct.cash_usdt == pytest.approx(8900.0)         # cash paid the margin
+    assert acct.cash_usdt == pytest.approx(8900.0)         # 1100 went to futures
+    assert acct.futures_wallet_usdt == pytest.approx(0.0)  # spare 600 was spent
 
 
 def test_condition_buy_without_position_is_blocked(stack):
@@ -633,7 +655,7 @@ def test_condition_fires_once_per_crossing_not_every_poll(stack):
     once, then stay silent on every later poll until the price re-crosses —
     it can never re-queue/re-execute in an infinite loop."""
     orch, market, sim = stack
-    _open_long(orch, margin=500.0, leverage=10.0)
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)  # spare wallet
     orch, market, sim = _arm_below(stack)
     market.prices["BTCUSDT"] = 1400.0                      # first crossing below
     run(orch.check_conditions())
@@ -652,7 +674,7 @@ def test_condition_rearms_after_price_returns(stack):
     """After the price comes back above the trigger, the same crossing fires
     the condition again — the latch is an edge detector, not a one-shot."""
     orch, market, sim = stack
-    _open_long(orch, margin=500.0, leverage=10.0)
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)  # spare wallet
     orch, market, sim = _arm_below(stack)
     market.prices["BTCUSDT"] = 1400.0
     run(orch.check_conditions())                           # fire #1
@@ -668,11 +690,12 @@ def test_condition_rearms_after_price_returns(stack):
     assert cond.fires == 2
 
 
-def test_condition_auto_mode_does_not_drain_cash_on_stale_trigger(stack):
-    """In auto mode the worst failure is draining cash each poll; the edge
-    trigger means a stuck-below price executes exactly once."""
+def test_condition_auto_mode_does_not_drain_funds_on_stale_trigger(stack):
+    """In auto mode the worst failure is spending the futures balance each
+    poll; the edge trigger means a stuck-below price executes exactly once."""
     orch, market, sim = stack
-    _open_long(orch, margin=500.0, leverage=10.0)          # cash 9500
+    # fund 500 margin + 900 spare futures balance (500 cash stays in spot)
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=900.0)
     orch, market, sim = _arm_below(stack, price=1500.0, amount=400.0)
     run(orch.handle_message("I understand - enable auto"))
     market.prices["BTCUSDT"] = 1400.0
@@ -685,39 +708,51 @@ def test_condition_auto_mode_does_not_drain_cash_on_stale_trigger(stack):
     acct = orch.account()
     pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
     assert pos.margin_usdt == pytest.approx(900.0)
-    assert acct.cash_usdt == pytest.approx(9100.0)
+    # the second +400 was never spent: 900 spare was deposited, 400 used
+    assert acct.futures_wallet_usdt == pytest.approx(500.0)
+    assert acct.cash_usdt == pytest.approx(8600.0)         # 1400 moved to futures
 
 
 def test_console_open_margin_transfer_close_end_to_end(stack):
-    """Plain-language console commands drive the whole lifecycle."""
+    """Plain-language console commands drive the whole lifecycle, Binance-style:
+    funds are moved into the futures wallet first, then used as margin."""
     orch, market, sim = stack
-    # 1) open via chat
+    # 0) deposit into the futures wallet via chat (the required first step)
+    r0 = run(orch.handle_message("move 2000 to futures"))
+    assert r0.intent == "funds" and r0.proposals
+    orch.decide(r0.proposals[0]["id"], True)
+    assert orch.account().futures_wallet_usdt == pytest.approx(2000.0)
+
+    # 1) open via chat (margin drawn from the futures wallet)
     r = run(orch.handle_message("open long BTC 500 at 10x"))
     assert r.intent == "open" and r.proposals, r.message
     assert r.proposals[0]["kind"] == "OPEN" and r.proposals[0]["symbol"] == "BTCUSDT"
     orch.decide(r.proposals[0]["id"], True)
     pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
     assert pos.quantity == pytest.approx(5.0)
+    assert orch.account().futures_wallet_usdt == pytest.approx(1500.0)
 
-    # 2) add margin via chat
+    # 2) add margin via chat (also from the futures wallet)
     r2 = run(orch.handle_message("add 200 margin to BTC"))
     assert r2.intent == "add_margin" and r2.proposals
     assert r2.proposals[0]["transfer_kind"] == "ADD_MARGIN"
     orch.decide(r2.proposals[0]["id"], True)
     pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
     assert pos.margin_usdt == pytest.approx(700.0)
+    assert orch.account().futures_wallet_usdt == pytest.approx(1300.0)
 
-    # 3) deposit free cash into the futures wallet via chat
+    # 3) deposit more free cash into the futures wallet via chat
     r3 = run(orch.handle_message("move 1000 to futures"))
     assert r3.intent == "funds" and r3.proposals
     orch.decide(r3.proposals[0]["id"], True)
-    assert orch.account().futures_wallet_usdt == pytest.approx(1000.0)
+    assert orch.account().futures_wallet_usdt == pytest.approx(2300.0)
 
-    # 4) close via chat
+    # 4) close via chat -> margin + PnL park back in the futures wallet
     r4 = run(orch.handle_message("close BTC"))
     assert r4.intent == "close" and r4.proposals
     orch.decide(r4.proposals[0]["id"], True)
     assert not [p for p in orch.account().futures_positions if p.symbol == "BTCUSDT"]
+    assert orch.account().futures_wallet_usdt == pytest.approx(3000.0, abs=0.5)
 
 
 def test_console_rail_edits_and_agent_mode(stack):
@@ -762,3 +797,47 @@ def test_small_typed_funds_transfer_is_allowed(stack):
     acct = orch.account()
     assert acct.futures_wallet_usdt == pytest.approx(2.5)
     assert acct.cash_usdt == pytest.approx(9997.5)
+
+
+# ---------------------------------------------------------------------------
+# Binance funding model regressions: futures wallet is the margin source
+# ---------------------------------------------------------------------------
+
+
+def test_open_requires_deposit_to_futures_wallet_first(stack):
+    """A fresh account starts with all $10k in spot and $0 in the futures
+    wallet. Under the Binance model, opening before depositing is blocked with
+    a clear message — it must never silently spot-fund the margin."""
+    orch, market, sim = stack
+    assert orch.account().cash_usdt == pytest.approx(10000.0)
+    assert orch.account().futures_wallet_usdt == pytest.approx(0.0)
+    resp = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))
+    assert not resp.proposals, "fresh account must not be able to open"
+    assert "deposit from spot first" in resp.message, resp.message
+    assert "futures" in resp.message.lower()
+    # nothing moved anywhere
+    acct = orch.account()
+    assert acct.cash_usdt == pytest.approx(10000.0)
+    assert acct.futures_wallet_usdt == pytest.approx(0.0)
+    assert not acct.futures_positions
+
+
+def test_add_margin_without_open_position_fails_cleanly(stack):
+    """A stale add-margin approval (position closed before it executed) must
+    fail loudly rather than silently 'succeeding' by moving nothing."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=200.0)
+    # queue an add-margin while the position is open…
+    r = run(orch.handle_message("add 200 margin to BTC"))
+    assert r.intent == "add_margin" and r.proposals
+    pending = r.proposals[0]["id"]
+    # …then close the position before approving it
+    c = run(orch.queue_close("BTCUSDT"))
+    orch.decide(c.proposals[0]["id"], True)
+    assert not [p for p in orch.account().futures_positions if p.symbol == "BTCUSDT"]
+    acct = orch.account()
+    wallet_before = acct.futures_wallet_usdt
+    # approving the stale add-margin must fail without moving money
+    out = orch.decide(pending, True)
+    assert "no open BTCUSDT position" in out.message, out.message
+    assert orch.account().futures_wallet_usdt == pytest.approx(wallet_before)

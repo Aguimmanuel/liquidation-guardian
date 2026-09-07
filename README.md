@@ -91,22 +91,28 @@ Binance Agent OS when you switch to live (see below).
 ![after reduce](docs/screenshots/after_reduce.png)
 ![coin analysis](docs/screenshots/analysis.png)
 
-Suggested first run:
+Suggested first run (funding follows the Binance futures model):
 
-1. In the **Trade** panel pick BTC and open a Long — say 20x with $600 margin.
+1. **Fund the futures wallet first.** A fresh account holds all $10k in spot
+   and nothing in the futures wallet. Margin is drawn from the futures wallet —
+   never spot — so use the wallet control at the top right of the **Trade**
+   panel to move some cash from spot → futures (e.g. $2,000). Opening or
+   adding margin before depositing is refused with a clear “deposit from spot
+   first” message.
+2. In the **Trade** panel pick BTC and open a Long — say 20x with $600 margin.
    Liquidation sits ~4.5% away, so the guardian flags it DANGER immediately.
-   (Blank leverage defaults to 10x; your leverage-cap guardrail blocks more.)
-2. In the positions table, arm a **take-profit** and a **stop-loss**.
-3. Hit **📈 Market analysis** and pick a coin for the deep read.
-4. Say `protect my positions` — the guardian proposes reduce and add-margin.
-5. Approve the reduce: liquidation jumps from ~4.5% to ~15% headroom. The
-   proceeds that were parked in the futures wallet can be moved back to spot
-   with the **↩ Move to spot** bar, and margin you no longer need on an open
-   position can be released per-row with the **↩** button.
-6. Open **Guardrails** and edit a limit — it applies instantly and persists
+   (Blank leverage defaults to 10x.)
+3. In the positions table, arm a **take-profit** and a **stop-loss**.
+4. Hit **📈 Market analysis** and pick a coin for the deep read.
+5. Say `protect my positions` — the guardian proposes reduce and add-margin.
+6. Approve the reduce: liquidation jumps from ~4.5% to ~15% headroom. Closing
+   a position or releasing margin you no longer need (per-row **↩** button)
+   lands USDT back in the futures wallet — move it on to spot with the same
+   wallet control whenever you like.
+7. Open **Guardrails** and edit a limit — it applies instantly and persists
    across restarts. There's no trade-count budget to babysit; the guardian
    protects any hour of any day.
-7. Try the **⚡ Auto** agent mode and read the consent notice before enabling.
+8. Try the **⚡ Auto** agent mode and read the consent notice before enabling.
    Let prices drift against your position: automatic mode de-risks it on its
    own, without you asking.
 

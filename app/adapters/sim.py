@@ -286,14 +286,12 @@ class SimAdapter:
         """Move USDT between the spot wallet and the futures side.
 
         TransferKind decides the direction and source:
-          ADD_MARGIN       spot -> futures (position margin, or the futures
-                            wallet if the position no longer exists),
+          ADD_MARGIN       free futures balance -> position margin (de-risk top-up),
           DEPOSIT_FUTURES  spot cash -> free futures-wallet balance (no position
                             is opened; funds just sit ready futures-side),
           RETURN_WALLET    futures wallet free balance -> spot,
-          RELEASE_MARGIN   excess margin on an open position -> spot (bounded so
-                            the position keeps its de-risk headroom and never
-                            exceeds the leverage cap).
+          RELEASE_MARGIN   excess margin on an open position -> futures wallet
+                            (bounded so the position keeps its de-risk headroom).
         """
         from app.agent.risk import evaluate_position, releasable_margin
 
@@ -377,7 +375,7 @@ class SimAdapter:
                     message="nothing to release — the position holds no excess margin right now",
                 )
             fp.margin_usdt -= take
-            state.cash_usdt += take
+            state.futures_wallet_usdt += take
             evaluate_position(
                 fp, fp.mark_price or price,
                 self.guardrails.liq_warn_pct, self.guardrails.liq_danger_pct,
@@ -393,22 +391,25 @@ class SimAdapter:
                 executed_price=0.0,
                 executed_value_usdt=round(take, 2),
                 fee_usdt=0.0,
-                message=f"released ${take:,.2f} margin on {proposal.symbol} back to spot",
+                message=f"released ${take:,.2f} excess margin on {proposal.symbol} to the futures wallet",
             )
 
-        # --- ADD_MARGIN (default / legacy): spot cash -> futures -------------
-        if state.cash_usdt < amount:
+        # --- ADD_MARGIN (default / legacy): free futures balance -> position --
+        fp = next((p for p in state.futures_positions if p.symbol == proposal.symbol), None)
+        if fp is None:
             return OrderResult(
                 ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
                 side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
-                message=f"not enough spot cash: have ${state.cash_usdt:,.2f}",
+                message=f"no open {proposal.symbol} position to add margin to — nothing was moved",
             )
-        state.cash_usdt -= amount
-        fp = next((p for p in state.futures_positions if p.symbol == proposal.symbol), None)
-        if fp is not None:
-            fp.margin_usdt += amount
-        else:
-            state.futures_wallet_usdt += amount
+        if state.futures_wallet_usdt < amount - 1e-9:
+            return OrderResult(
+                ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
+                side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
+                message=f"not enough free futures balance: have ${state.futures_wallet_usdt:,.2f}",
+            )
+        state.futures_wallet_usdt -= amount
+        fp.margin_usdt += amount
         if not bootstrap:
             state.last_trade_at = utcnow()
         self._save()
@@ -420,11 +421,13 @@ class SimAdapter:
             executed_price=0.0,
             executed_value_usdt=round(amount, 2),
             fee_usdt=0.0,
-            message=f"transferred ${amount:,.2f} into futures margin",
+            message=f"added ${amount:,.2f} margin to {proposal.symbol} from the futures balance",
         )
 
     def _execute_open(self, proposal: TradeProposal, bootstrap: bool) -> OrderResult:
-        """Open a new leveraged position. margin comes from spot cash."""
+        """Open a new leveraged position. Margin comes from the free balance of
+        the USDⓈ-M futures wallet (Binance model: fund futures first, then
+        trade)."""
         state = self._state
         assert state is not None
         margin = proposal.open_margin_usdt
@@ -436,11 +439,14 @@ class SimAdapter:
                 side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
                 message="no market price available to open",
             )
-        if state.cash_usdt < margin:
+        if state.futures_wallet_usdt < margin - 1e-9:
             return OrderResult(
                 ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
                 side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
-                message=f"not enough spot cash: need ${margin:,.2f}, have ${state.cash_usdt:,.2f}",
+                message=(
+                    f"not enough free futures balance: need ${margin:,.2f}, "
+                    f"have ${state.futures_wallet_usdt:,.2f} — deposit from spot first"
+                ),
             )
         existing = next((p for p in state.futures_positions if p.symbol == proposal.symbol), None)
         want_side = PositionSide.LONG if proposal.side == Side.BUY else PositionSide.SHORT
@@ -450,7 +456,7 @@ class SimAdapter:
                 side=proposal.side, executed_price=0.0, executed_value_usdt=0.0,
                 message=f"opposite {existing.side.value} position already open on {proposal.symbol} — close it first",
             )
-        state.cash_usdt -= margin
+        state.futures_wallet_usdt -= margin
         qty = (margin * leverage) / price
         if existing is not None:
             # add to existing same-side position (avg entry)

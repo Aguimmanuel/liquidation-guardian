@@ -137,10 +137,14 @@ thresholds (danger zone, watch zone, de-risk target) — sanity-bounded
 (`RAIL_BOUNDS`) and persisted to `data/guardrail_state.json`.
 
 Money movement is two-way. Transfers are a single proposal kind with a
-`transfer_kind` discriminator: `ADD_MARGIN` (spot → position margin, the
-de-risk top-up), `DEPOSIT_FUTURES` (spot cash → free futures wallet),
-`RETURN_WALLET` (free futures wallet → spot), and `RELEASE_MARGIN` (excess
-margin on an open position → spot). Free-balance moves never touch an open
+`transfer_kind` discriminator: `ADD_MARGIN` (futures wallet free balance →
+position margin, the de-risk top-up), `DEPOSIT_FUTURES` (spot cash → free
+futures wallet), `RETURN_WALLET` (free futures wallet → spot), and
+`RELEASE_MARGIN` (excess margin on an open position → futures wallet). Margin
+for opening and add-margin always comes out of the futures wallet — never out
+of spot — matching Binance's USDTⓈ-M futures model; a fresh account holds all
+its cash in spot until the user deposits into the futures wallet. Free-balance
+moves never touch an open
 position's margin; the release size is bounded by `risk.releasable_margin`,
 which keeps the position at least at its de-risk headroom
 (`liq_target_dist_pct`) — so moving money back out can never recreate the
@@ -181,7 +185,7 @@ every monitor poll (no approval-queue spam, no auto-mode cash drain). A BUY
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (71 tests, no network —
+`tests/` covers the risk engine and feature surface (73 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
 distance and risk zones, `required_cut`/`required_margin`, `margin_for_target`/
 `releasable_margin`, the guardrail checks, the plain-language console parser,

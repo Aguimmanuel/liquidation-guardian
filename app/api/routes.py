@@ -127,7 +127,7 @@ def build_router(orch: Orchestrator) -> APIRouter:
         if body.scope == "position":
             if not body.symbol:
                 raise HTTPException(status_code=400, detail="symbol is required for scope='position'")
-            resp = await orch.release_margin_to_spot(body.symbol)
+            resp = await orch.release_margin_to_wallet(body.symbol)
         else:
             resp = await orch.return_futures_wallet_to_spot()
         return resp.to_dict()

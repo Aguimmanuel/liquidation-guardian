@@ -390,7 +390,7 @@ class Orchestrator:
                 intent="release",
                 state=self.snapshot(),
             )
-        return await self.release_margin_to_spot(symbol)
+        return await self.release_margin_to_wallet(symbol)
 
     async def _console_funds(self, p: dict[str, Any]) -> AgentResponse:
         direction = str(p.get("direction") or "").lower()
@@ -1042,12 +1042,14 @@ class Orchestrator:
             if not result.ok:
                 reasons.append(result.reason)
         if prop.kind == ProposalKind.TRANSFER and prop.transfer_kind != TransferKind.RELEASE_MARGIN:
-            # ADD_MARGIN / legacy transfers take spot cash -> the futures side.
+            # ADD_MARGIN (de-risk top-up / condition) takes the FREE FUTURES
+            # balance -> position margin (Binance model: futures are funded
+            # from the futures wallet, never from spot).
             reasons += [
                 r.reason
                 for r in [
-                    check_spot_funds_sufficient(
-                        state.cash_usdt, prop.est_value_usdt
+                    check_futures_funds_sufficient(
+                        state.futures_wallet_usdt, prop.est_value_usdt
                     )
                 ]
                 if not r.ok
@@ -1104,7 +1106,8 @@ class Orchestrator:
         amount = round(float(cond.amount_usdt), 2)
         if cond.side == Side.BUY:
             # BUY condition = "add margin" to the open position. This is a real
-            # margin transfer (spot cash -> position margin), never a sell.
+            # margin transfer (futures wallet free balance -> position margin),
+            # never a sell.
             prop = TradeProposal(
                 id=uuid.uuid4().hex[:10],
                 symbol=cond.symbol,
@@ -1297,7 +1300,7 @@ class Orchestrator:
                 elif tkind == TransferKind.RELEASE_MARGIN:
                     summary = (
                         f"Released ${result.executed_value_usdt:,.2f} excess margin "
-                        f"on {result.symbol} back to spot cash"
+                        f"on {result.symbol} into the futures wallet"
                     )
                 elif tkind == TransferKind.DEPOSIT_FUTURES:
                     summary = (
@@ -1632,8 +1635,9 @@ class Orchestrator:
             "leverage must be a positive number of x",
         )
         _note(
-            state.cash_usdt >= margin_usdt,
-            f"not enough cash: need ${margin_usdt:,.0f}, have ${state.cash_usdt:,.0f}",
+            state.futures_wallet_usdt >= margin_usdt,
+            f"not enough free futures balance: need ${margin_usdt:,.0f}, "
+            f"have ${state.futures_wallet_usdt:,.0f} — deposit from spot first",
         )
         side_enum = Side.BUY if side.upper() == "LONG" else Side.SELL
         existing = next(
@@ -1672,7 +1676,7 @@ class Orchestrator:
             open_margin_usdt=margin_usdt,
             open_leverage=leverage,
             reason=f"Open {side.upper()} {symbol} at {leverage:.0f}x with ${margin_usdt:,.0f} margin "
-            f"(entry ~${price:,.0f}). Margin comes from spot cash.",
+            f"(entry ~${price:,.0f}). Margin is taken from your free futures balance.",
         )
         self.proposals[prop.id] = prop
         self.log(
@@ -1778,7 +1782,8 @@ class Orchestrator:
     # ------------------------------------------------- funds (futures -> spot)
     def _releasable_margin(self, pos: FuturesPosition) -> Optional[float]:
         """USDT that can be safely pulled off an open position right now and
-        moved back to spot, or None when nothing can be released.
+        moved back into the free futures wallet, or None when nothing can be
+        released.
 
         Releasing is only offered while the position keeps at least the
         configured de-risk headroom (see ``risk.releasable_margin``), and only
@@ -1857,8 +1862,10 @@ class Orchestrator:
             proposals=[prop.to_dict()],
         )
 
-    async def release_margin_to_spot(self, symbol: str) -> AgentResponse:
-        """Pull the excess margin off an open position back to spot.
+    async def release_margin_to_wallet(self, symbol: str) -> AgentResponse:
+        """Pull the excess margin off an open position back into the free
+        futures wallet (Binance model: released margin stays futures-side; use
+        the spot transfer to withdraw it from there).
 
         Bounded so the position keeps at least the configured de-risk headroom —
         releasing can only ever leave the position back at its normal protected
@@ -1913,22 +1920,22 @@ class Orchestrator:
                 f"{pos.side.value} {symbol} sits {pos.distance_pct * 100:.1f}% from "
                 f"liquidation with ${pos.margin_usdt:,.2f} margin. The margin above "
                 f"what keeps {target * 100:.0f}% headroom is idle insurance — "
-                f"release ${amount:,.2f} back to spot and the position keeps "
-                f"≥ {target * 100:.0f}% headroom."
+                f"release ${amount:,.2f} back into the futures wallet and the "
+                f"position keeps ≥ {target * 100:.0f}% headroom."
             ),
         )
         self.proposals[prop.id] = prop
         self.log(
             AuditLevel.INFO,
             "release_proposed",
-            f"{symbol} margin ${amount:,.2f} -> spot",
+            f"{symbol} margin ${amount:,.2f} -> futures wallet",
             prop.id,
         )
         if self._auto_active():
             self.log(
                 AuditLevel.ACTION,
                 "auto_mode",
-                f"automatic mode released {symbol} excess margin to spot",
+                f"automatic mode released {symbol} excess margin to the futures wallet",
                 prop.id,
             )
             resp = self.decide(prop.id, True)
@@ -1939,13 +1946,15 @@ class Orchestrator:
             )
         return AgentResponse(
             message=(
-                f"📝 Release ${amount:,.2f} excess margin on {symbol} back to spot "
-                f"(keeps ≥ {target * 100:.0f}% liquidation headroom)? Approve to execute."
+                f"📝 Release ${amount:,.2f} excess margin on {symbol} back into the "
+                f"futures wallet (keeps ≥ {target * 100:.0f}% liquidation headroom)? "
+                "Approve to execute."
             ),
             intent="release",
             state=self.snapshot(),
             proposals=[prop.to_dict()],
         )
+
 
     def set_tp_sl(self, symbol: str, tp: float = 0.0, sl: float = 0.0) -> AgentResponse:
         symbol = symbol.upper()
