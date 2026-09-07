@@ -176,7 +176,7 @@ def build_router(orch: Orchestrator) -> APIRouter:
             "amount_usdt": body.amount_usdt,
             "note": body.note,
         }
-        resp = await orch._do_add_condition(cond)
+        resp = await orch.add_condition(cond)
         return resp.to_dict()
 
     @router.api_route("/conditions/check", methods=["GET", "POST"])

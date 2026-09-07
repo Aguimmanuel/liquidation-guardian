@@ -85,14 +85,19 @@ observe ──► analyze ──► decide ──► narrate ──► approve? 
 - **act (automatic mode)** — a header toggle switches the orchestrator to
   automatic mode, but only after the user accepts an on-screen notice that
   *agents can make mistakes*. Once consented, queued opens/closes and fired
-  conditions execute immediately, and a background *auto-protect scan*
-  (`orchestrator.auto_protect_scan`, run by the server autopilot) watches
-  every open position: any that slips into the danger zone is de-risked on its
-  own, with no prompt required (guardrails still gate everything; the de-risk
-  prefers the *reduce* — no extra capital — and rejects the unchosen option,
-  and retries are throttled per symbol so a blocked attempt can't spam the
-  audit trail). Switching back to Manual revokes consent.
-  The same `monitor_positions()` loop runs in *both* modes while positions are
+  conditions execute immediately, and the always-on guardian sweep
+  (`orchestrator.monitor_positions`, run by the server autopilot every 2 s)
+  watches every open position in *both* modes: any that slips into the danger
+  zone is de-risked on its own, with no prompt required (guardrails still gate
+  everything). The deterministic auto-chooser picks per symbol — reduce
+  (no extra capital) whenever one is viable, add-margin only when a reduce
+  can't restore the headroom target, never both — and the response explains
+  the trade-off in plain English. Retries are throttled per symbol so a
+  blocked attempt can't spam the audit trail. The sweep order is protective
+  exits → monitor → conditions, so a condition never stacks a second action on
+  a symbol that already has a pending plan. Switching back to Manual revokes
+  consent.
+  The same `monitor_positions()` loop runs while positions are
   open: it tracks each symbol's risk zone and logs zone changes, and on DANGER
   it queues a de-risk plan in manual mode (approval still required) or
   executes it in automatic mode — so the guardian escalates without being
@@ -185,7 +190,7 @@ every monitor poll (no approval-queue spam, no auto-mode cash drain). A BUY
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (89 tests, no network —
+`tests/` covers the risk engine and feature surface (100 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
 distance and risk zones, `required_cut`/`required_margin`, `margin_for_target`/
 `releasable_margin`, the guardrail checks, the plain-language console parser,

@@ -145,7 +145,7 @@ with a small amount in the sub-account and work up.
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 89 unit tests, no network needed
+python -m pytest tests/ -q            # 100 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```
@@ -182,6 +182,8 @@ main knobs:
 | `RS_LIQ_TARGET_DIST_PCT` | `0.15` | de-risk until 15% headroom |
 | `RS_TICKER_TTL` | `1` | live-ticker refresh interval in seconds |
 | `RS_SYMBOL_ALLOWLIST` | BTC,ETH,BNB,SOL | empty = allow any symbol |
+| `RS_API_TOKEN` | — | optional bearer token gate for state-changing `/api` calls (read-only GETs and the UI stay open) |
+| `RS_CORS_ORIGINS` | — | comma-separated origins allowed cross-origin; empty = same-origin only |
 | `OPENAI_API_KEY` | — | optional: LLM narration + intent parsing |
 
 Env vars are the boot defaults only. Edits made in the UI are persisted to

@@ -51,6 +51,9 @@ class SimAdapter:
         self.state_file = Path(state_file or config.state_file)
         self._state: Optional[AccountState] = None
         self._loaded = False
+        # B10: last ticker prices seen by refresh_prices — the freshest fill
+        # price available synchronously inside execute() (decide runs sync).
+        self._live: dict[str, float] = {}
 
     # ------------------------------------------------------------------ state
     def _load(self) -> None:
@@ -169,6 +172,9 @@ class SimAdapter:
             tickers = await self.market.get_watch_tickers(list(symbols))
         except MarketDataError:
             return  # keep last known prices; a later refresh will catch up
+        self._live = {
+            sym: t.price for sym, t in tickers.items() if t and t.price > 0
+        }
         for pos in state.positions:
             t = tickers.get(pos.symbol)
             if t and t.price > 0:
@@ -223,6 +229,9 @@ class SimAdapter:
             return self._execute_open(proposal, bootstrap)
 
         price = proposal.est_price if proposal.est_price > 0 else proposal.executed_price or 0.0
+        live = self._live.get(proposal.symbol, 0.0)
+        if live > 0:
+            price = live  # B10: fill at the current mark, never a stale estimate
         is_futures = self._has_futures_position(proposal.symbol)
         fee = 0.0  # tracked per path so the reported fee matches the real one
 
@@ -365,7 +374,9 @@ class SimAdapter:
                         "watch zone so releasing margin can't push a position into risk"
                     ),
                 )
-            price = proposal.est_price if proposal.est_price > 0 else fp.mark_price
+            price = self._live.get(proposal.symbol, 0.0) or (
+                proposal.est_price if proposal.est_price > 0 else fp.mark_price
+            )
             if price <= 0:
                 return OrderResult(
                     ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
@@ -449,6 +460,9 @@ class SimAdapter:
                 ),
             )
         price = proposal.est_price if proposal.est_price > 0 else 0.0
+        live = self._live.get(proposal.symbol, 0.0)
+        if live > 0:
+            price = live  # B10: opens fill at the current mark too
         if price <= 0:
             return OrderResult(
                 ok=False, proposal_id=proposal.id, symbol=proposal.symbol,
@@ -636,6 +650,7 @@ class SimAdapter:
 
     # -------------------------------------------------------------- control
     def reset(self, cash: Optional[float] = None) -> AccountState:
+        self._live.clear()
         now = utcnow()
         self._state = AccountState(
             total_value_usdt=cash or self.config.default_initial_cash,

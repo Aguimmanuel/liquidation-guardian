@@ -135,7 +135,7 @@ class Orchestrator:
         self.agent_mode: str = "manual"
         self.auto_consent: bool = False
         # per-symbol throttle for the danger sweep (see monitor_positions /
-        # auto_protect_scan) so a blocked retry never spams the audit trail.
+        # monitor_positions) so a blocked retry never spams the audit trail.
         self._auto_risk_attempt: dict[str, datetime] = {}
         self._auto_risk_retry_s: float = 120.0
         # per-symbol last-known risk zone (OK / WATCH / DANGER) so the always-on
@@ -200,6 +200,20 @@ class Orchestrator:
                 g.symbol_allowlist = [
                     str(s).strip().upper() for s in allow if str(s).strip()
                 ]
+            # B11: never boot with an inverted rail order. A profile that
+            # breaks danger < warn < target (e.g. written by an older version
+            # or hand-edited) silently inverts the zone logic, so clamp the
+            # trio back to the safe defaults instead.
+            if not (0.0 < g.liq_danger_pct < g.liq_warn_pct < g.liq_target_dist_pct < 1.0):
+                g.liq_danger_pct = 0.06
+                g.liq_warn_pct = 0.10
+                g.liq_target_dist_pct = 0.15
+                self.log(
+                    AuditLevel.GUARDRAIL,
+                    "guardrails_clamped",
+                    "persisted profile violated 0 < danger < warn < target < 1 "
+                    "— rails reset to defaults",
+                )
         except Exception:
             pass
 
@@ -294,7 +308,7 @@ class Orchestrator:
         if intent == "market":
             return await self.market_analysis(intent_raw.get("symbol"))
         if intent == "add_condition":
-            return await self._do_add_condition(intent_raw.get("condition", {}))
+            return await self.add_condition(intent_raw.get("condition", {}))
         if intent == "open":
             return await self._console_open(intent_raw)
         if intent == "close":
@@ -780,20 +794,63 @@ class Orchestrator:
     ) -> AgentResponse:
         """Execute guardrailed de-risk proposals autonomously.
 
-        Prefers the reduce (deleverage, no extra capital) and only adds margin
-        when a reduce is not possible — never both. Rejects the unchosen option
-        so nothing confusing lingers in the queue.
+        The choice is deterministic and made *per symbol*: a reduce (close part,
+        no extra capital) is preferred whenever it was proposed; add-margin is
+        used only for a symbol where no viable reduce exists (cut <= 0). Never
+        both. The message and audit explain the trade-off in plain English.
+        Unchosen options are rejected so nothing confusing lingers in the queue.
         """
-        chosen = [p for p in new_pending if p.kind == ProposalKind.TRADE]
-        if not chosen:
-            chosen = new_pending
+        by_symbol: dict[str, list[TradeProposal]] = {}
+        for prop in new_pending:
+            by_symbol.setdefault(prop.symbol, []).append(prop)
+
+        target_pct = self.guardrails.liq_target_dist_pct * 100.0
+        chosen: list[TradeProposal] = []
+        rationale: list[str] = []
+        for sym, options in by_symbol.items():
+            reduces = [p for p in options if p.kind == ProposalKind.TRADE]
+            tops = [p for p in options if p.kind == ProposalKind.TRANSFER]
+            base = sym.replace("USDT", "")
+            if reduces:
+                take = reduces[0]
+                add_val = max((p.est_value_usdt for p in tops), default=0.0)
+                why = take.reason
+                # strip the leading "Option A — reduce:" framing from the reason;
+                # the reason already carries the liq/leverage/headroom numbers.
+                if why.startswith("Option A — reduce: "):
+                    why = why.split("Option A — reduce: ", 1)[1]
+                if add_val > 0:
+                    rationale.append(
+                        f"{sym}: chose REDUCE over add-margin — no extra capital needed; "
+                        f"topping up margin instead would spend ${add_val:,.2f} of free "
+                        f"futures balance. ({why})"
+                    )
+                else:
+                    rationale.append(
+                        f"{sym}: reduce is the only live option. ({why})"
+                    )
+            elif tops:
+                take = tops[0]
+                add_val = take.est_value_usdt
+                rationale.append(
+                    f"{sym}: chose ADD-MARGIN over reduce — a partial close can't restore "
+                    f"the ~{target_pct:.0f}% headroom target on its own, so a "
+                    f"${add_val:,.2f} top-up keeps the full position. ({take.reason})"
+                )
+            else:
+                continue  # nothing actionable for this symbol
+            chosen.append(take)
+
         chosen_ids = {p.id for p in chosen}
         self.log(
             AuditLevel.ACTION,
             event,
-            f"automatic mode executed {len(chosen)} de-risk action(s) without approval",
+            "automatic mode executed "
+            + str(len(chosen))
+            + " de-risk action(s) without approval; "
+            + " ".join(rationale),
         )
-        done = []
+        done: list[str] = []
         for prop in chosen:
             self.decide(prop.id, True)
             done.append(
@@ -803,79 +860,20 @@ class Orchestrator:
         for prop in new_pending:
             if prop.id not in chosen_ids and prop.status == ProposalStatus.PENDING:
                 self.decide(prop.id, False)
+        body = "\n".join(done)
+        if rationale:
+            body += "\n\nWhy: " + " ".join(rationale)
         return AgentResponse(
             message=(
                 headline
                 + ":\n"
-                + "\n".join(done)
+                + body
                 + "\n\nEvery action cleared the guardrails "
                 "and is in the audit trail. Switch to Manual to go back to approving each step."
             ),
             intent="de_risk",
             state=self.snapshot(),
         )
-
-    async def auto_protect_scan(self) -> list[AgentResponse]:
-        """Proactive guardian sweep — the reason automatic mode exists.
-
-        While automatic mode is active (consent given), this runs on the server
-        timer and acts *without any prompt*: any position that slips into the
-        danger zone is de-risked straight to the configured headroom. Manual
-        mode returns immediately; the chat-driven "protect my positions" path
-        stays for humans who want to trigger the same scan themselves.
-
-        Retries are throttled per symbol so a blocked attempt (e.g. no cash)
-        can never spam the audit trail every sweep.
-        """
-        if not self._auto_active():
-            return []
-        try:
-            await self.refresh()
-        except Exception:
-            return []
-        state = self.account()
-        now = utcnow()
-        responses: list[AgentResponse] = []
-        for pos in state.futures_positions:
-            if pos.risk.value != "DANGER":
-                continue
-            sym = pos.symbol
-            last = self._auto_risk_attempt.get(sym)
-            if last is not None and (now - last).total_seconds() < self._auto_risk_retry_s:
-                continue
-            if any(
-                pp.symbol == sym and pp.status == ProposalStatus.PENDING
-                for pp in self.proposals.values()
-            ):
-                continue
-            self._auto_risk_attempt[sym] = now
-            before = set(self.proposals)
-            self._propose_de_risk_for(pos, state)
-            new_pending = [
-                p
-                for p in self.proposals.values()
-                if p.id not in before and p.status == ProposalStatus.PENDING
-            ]
-            if not new_pending:
-                continue  # every option was blocked; reasons are already audited
-            self.log(
-                AuditLevel.ACTION,
-                "auto_protect_scan",
-                f"{sym} entered the danger zone ({pos.distance_pct * 100:.1f}% from liq) — "
-                f"auto de-risk engaged",
-            )
-            responses.append(
-                self._auto_exec_de_risk(
-                    new_pending,
-                    event="auto_de_risk",
-                    headline=(
-                        "⚡ Guardian auto-protect — "
-                        + sym
-                        + " reached the danger zone and was de-risked without waiting for approval"
-                    ),
-                )
-            )
-        return responses
 
     async def monitor_positions(self) -> list[AgentResponse]:
         """Always-on per-position guardian loop — runs in BOTH manual and auto.
@@ -953,7 +951,7 @@ class Orchestrator:
             if self._auto_active():
                 self.log(
                     AuditLevel.ACTION,
-                    "auto_protect_scan",
+                    "auto_de_risk_engaged",
                     f"{sym} entered the danger zone ({pos.distance_pct * 100:.1f}% from liq) — "
                     f"auto de-risk engaged",
                 )
@@ -1077,7 +1075,7 @@ class Orchestrator:
         return not reasons, reasons
 
     # -------------------------------------------------------------- conditions
-    async def _do_add_condition(self, cond: dict[str, Any]) -> AgentResponse:
+    async def add_condition(self, cond: dict[str, Any]) -> AgentResponse:
         try:
             c = Condition(
                 id=uuid.uuid4().hex[:10],
@@ -1134,6 +1132,29 @@ class Orchestrator:
         self, cond: Condition, price: float
     ) -> AgentResponse:
         state = self.account()
+        # Mutual exclusion (#1): if a de-risk plan (or any proposal) for this
+        # symbol is already pending approval, do not stack a second action on
+        # top of it. The condition has already spent its one shot by the time we
+        # get here (one-shot semantics), so this only ever logs and explains.
+        if any(
+            pp.symbol == cond.symbol and pp.status == ProposalStatus.PENDING
+            for pp in self.proposals.values()
+        ):
+            self.log(
+                AuditLevel.INFO,
+                "condition_deferred",
+                f"{cond.symbol} has a pending proposal — fired condition "
+                f"({cond.op.value} {cond.price:,.2f}) did not stack another action",
+            )
+            return AgentResponse(
+                message=(
+                    f"🚨 Condition fired on {cond.symbol} @ {price:,.2f}, but {cond.symbol} "
+                    "already has a plan pending approval — skipped so two actions don't "
+                    "pile up on the same position."
+                ),
+                intent="condition",
+                state=self.snapshot(),
+            )
         has_pos = any(
             fp.symbol == cond.symbol for fp in state.futures_positions
         )
@@ -2160,6 +2181,10 @@ class Orchestrator:
         g = self.guardrails
         changed: list[str] = []
         refused: list[str] = []
+        # Candidate merged profile — nothing is applied until every value
+        # passes both its own bounds AND the cross-field ordering (B11).
+        candidate = {k: float(getattr(g, k)) for k in EDITABLE_RAIL_KEYS}
+        touched = set()
 
         for k in EDITABLE_RAIL_KEYS:
             if k not in updates:
@@ -2184,11 +2209,34 @@ class Orchestrator:
                         f"{k}: {self._fmt_val(k, val)} must be >= {self._fmt_val(k, lo)}"
                     )
                 continue
-            cur = getattr(g, k)
-            if abs(val - float(cur)) < 1e-12:
+            candidate[k] = val
+            touched.add(k)
+
+        # B11: the three rails must stay ordered 0 < danger < warn < target < 1.
+        # An edit touching any rail is refused outright if the merged profile
+        # would break the ordering (a silent inversion flips every zone test).
+        if touched & set(EDITABLE_RAIL_KEYS):
+            d = candidate["liq_danger_pct"]
+            w = candidate["liq_warn_pct"]
+            t = candidate["liq_target_dist_pct"]
+            if not (0.0 < d < w < t < 1.0):
+                refused.append(
+                    "rails must keep 0 < danger < warn < target < 1 — the "
+                    "requested profile would give danger "
+                    + self._fmt_val("liq_danger_pct", d)
+                    + " < warn "
+                    + self._fmt_val("liq_warn_pct", w)
+                    + " < target "
+                    + self._fmt_val("liq_target_dist_pct", t)
+                    + " (which does not hold)"
+                )
+                candidate = {k: float(getattr(g, k)) for k in EDITABLE_RAIL_KEYS}
+
+        for k in EDITABLE_RAIL_KEYS:
+            if abs(candidate[k] - float(getattr(g, k))) < 1e-12:
                 continue  # no-op edit
-            setattr(g, k, val)
-            changed.append(f"{k}={self._fmt_val(k, val)}")
+            setattr(g, k, candidate[k])
+            changed.append(f"{k}={self._fmt_val(k, candidate[k])}")
 
         # --- symbol allowlist (hygiene list, not a risk ceiling) -----------
         if isinstance(updates.get("symbol_allowlist"), list):

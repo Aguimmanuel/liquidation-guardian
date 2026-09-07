@@ -297,9 +297,12 @@ def test_release_refused_when_nothing_excess_and_target_misconfigured(stack):
     ret = run(orch.release_margin_to_wallet("BTCUSDT"))
     assert not ret.proposals
     assert "no excess margin" in ret.message.lower()
-    # a nonsense config (target <= watch zone) must suspend releases outright
+    # a nonsense config (target <= watch zone) must suspend releases outright.
+    # B11 now refuses such an edit through update_guardrails, so we simulate
+    # the only remaining source: a legacy/corrupt profile loaded straight into
+    # the config object (the orchestrator still defends itself).
     _open_long(orch, symbol="ETHUSDT", margin=500.0, leverage=10.0)
-    orch.update_guardrails({"liq_target_dist_pct": 0.08})   # below watch 0.10
+    orch.guardrails.liq_target_dist_pct = 0.08              # below watch 0.10
     ret2 = run(orch.release_margin_to_wallet("ETHUSDT"))
     assert not ret2.proposals
     assert "de-risk target" in ret2.message
@@ -422,6 +425,53 @@ def test_guardrail_edits_reject_out_of_bounds(stack):
     assert "not a finite number" in nan.message
 
 
+def test_guardrail_edit_refuses_inverted_rail_order(stack):
+    """B11: no edit may break 0 < danger < warn < target < 1 — an inverted
+    profile would silently flip every zone test."""
+    orch, market, sim = stack
+    assert orch.guardrails.liq_danger_pct < orch.guardrails.liq_warn_pct < orch.guardrails.liq_target_dist_pct
+    bad = orch.update_guardrails({"liq_target_dist_pct": 0.08})  # below warn 0.10
+    assert "danger < warn < target" in bad.message
+    assert orch.guardrails.liq_target_dist_pct == pytest.approx(0.15), "edit refused"
+    bad2 = orch.update_guardrails({"liq_danger_pct": 0.12})      # above warn 0.10
+    assert "danger < warn < target" in bad2.message
+    assert orch.guardrails.liq_danger_pct == pytest.approx(0.06)
+    # combined valid edit across all three rails is fine
+    ok = orch.update_guardrails({
+        "liq_danger_pct": 0.04, "liq_warn_pct": 0.08, "liq_target_dist_pct": 0.20,
+    })
+    assert "Refused" not in ok.message
+    assert orch.guardrails.liq_danger_pct == pytest.approx(0.04)
+    assert orch.guardrails.liq_warn_pct == pytest.approx(0.08)
+    assert orch.guardrails.liq_target_dist_pct == pytest.approx(0.20)
+
+
+def test_inverted_profile_clamped_on_load(stack, tmp_path):
+    """B11: a persisted profile that breaks the rail ordering is clamped back
+    to the safe defaults on startup — never booted into inverted zone logic."""
+    orch, market, sim = stack
+    # write an inverted profile straight to the guardrail state file (as an
+    # older/corrupt file could), then boot a fresh orchestrator on it
+    path = orch.config.guardrail_state_file
+    import json as _json
+    from pathlib import Path as _Path
+    _Path(path).write_text(_json.dumps({
+        "values": {
+            "liq_danger_pct": 0.18,        # > warn 0.10 and > target 0.08
+            "liq_warn_pct": 0.10,
+            "liq_target_dist_pct": 0.08,
+        },
+        "symbol_allowlist": ["BTCUSDT", "ETHUSDT"],
+    }))
+    from app.agent.orchestrator import Orchestrator
+    from app.config import GuardrailConfig
+    g2 = GuardrailConfig()
+    orch2 = Orchestrator(orch.config, g2, sim, market)
+    assert g2.liq_danger_pct < g2.liq_warn_pct < g2.liq_target_dist_pct
+    assert g2.liq_danger_pct == pytest.approx(0.06), "clamped to the safe default"
+    assert any(a.event == "guardrails_clamped" for a in orch2.audit)
+
+
 def test_profile_values_persist_across_restart(stack, tmp_path):
     """Edits survive a restart (env defaults no longer win)."""
     orch, market, sim = stack
@@ -446,32 +496,47 @@ def _open_danger_long(orch):
     return pos
 
 
-def test_auto_protect_scan_does_nothing_in_manual_mode(stack):
+def test_auto_mode_message_explains_reduce_over_add_margin(stack):
+    """#3: in automatic mode the deterministic rule must prefer the reduce
+    (no extra capital) whenever one is viable, and the response has to explain
+    the trade-off in plain English — never a silent pick, never both options."""
     orch, market, sim = stack
-    _open_danger_long(orch)
-    assert orch.agent_mode == "manual"
-    responses = run(orch.auto_protect_scan())
-    assert responses == []
-    # position untouched, nothing queued
-    assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
-
-
-def test_auto_protect_scan_derisks_danger_without_prompt(stack):
-    """The core proactive behavior: automatic mode de-risks a position that
-    slips into the danger zone with nobody asking it to."""
-    orch, market, sim = stack
-    pos = _open_danger_long(orch)
-    quantity_before = pos.quantity
+    # fund margin + spare balance so BOTH de-risk options are on the table
+    _fund(orch, 1200.0)
+    opened = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 10.0))
+    orch.decide(opened.proposals[0]["id"], True)
+    market.prices["BTCUSDT"] = 920.0                   # push LONG into DANGER
     orch.set_agent_mode("auto", consent=True)
 
-    responses = run(orch.auto_protect_scan())
+    responses = run(orch.monitor_positions())
     assert responses, "guardian must act on a DANGER position by itself"
-    assert any(a.event == "auto_protect_scan" for a in orch.audit)
-    assert any(a.event == "auto_de_risk" for a in orch.audit)
-    assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
     healed = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
-    assert healed.quantity < quantity_before          # reduced, not margin-added
-    assert healed.risk.value != "DANGER"              # back to safe headroom
+    assert healed.quantity < 5000.0 / 920.0, "reduce-first: quantity must drop"
+    text = responses[0].message
+    assert "Why:" in text and "REDUCE over add-margin" in text
+    assert "no extra capital" in text
+    # the unchosen add-margin option was rejected, not left pending
+    assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    assert any(a.event == "auto_de_risk" for a in orch.audit)
+
+
+def test_auto_mode_message_adds_margin_when_reduce_not_viable(stack):
+    """#3: when no viable reduce exists for a symbol (the engine would omit
+    Option A), the deterministic rule chooses add-margin and says why."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=700.0)
+    market.prices["BTCUSDT"] = 920.0                    # LONG slips toward liq
+    run(orch.monitor_positions())                       # manual: queue both options
+    pend = {p.kind.value: p for p in orch.proposals.values()
+            if p.status.value == "PENDING"}
+    assert "TRADE" in pend and "TRANSFER" in pend
+    # hand the auto-chooser ONLY the margin option (reduce omitted = not viable)
+    resp = orch._auto_exec_de_risk([pend["TRANSFER"]])
+    assert "ADD-MARGIN over reduce" in resp.message
+    assert "partial close can't restore" in resp.message
+    pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
+    assert pos.margin_usdt == pytest.approx(500.0 + pend["TRANSFER"].est_value_usdt)
+    assert pos.quantity == pytest.approx(5000.0 / 1000.0)  # opened @1000, full position kept
 
 
 def test_auto_protect_throttles_blocked_attempts(stack):
@@ -553,6 +618,29 @@ def test_monitor_visibility_watch_logged_ok_silent(stack):
     assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
 
 
+def test_b10_close_fills_at_current_mark_not_stale_estimate(stack):
+    """B10: a proposal approved after the price has drifted must fill at the
+    CURRENT mark, not the estimate captured at propose time. est_price stays
+    on the proposal as the record of what was offered."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0)        # 5 BTC @ 1000
+    market.prices["BTCUSDT"] = 1100.0                    # move before proposing
+    run(orch.refresh())                                  # quote the proposal at 1100
+    run(orch.queue_close("BTCUSDT", close_all=True))
+    prop = next(p for p in orch.proposals.values() if p.status.value == "PENDING")
+    assert prop.est_price == pytest.approx(1100.0), "proposal priced at propose time"
+    market.prices["BTCUSDT"] = 1200.0                    # drifts before approval
+    run(orch.refresh())                                  # mark the current quote
+    out = orch.decide(prop.id, True)
+    assert "Closed BTCUSDT" in out.message and "@ 1,200" in out.message
+    assert prop.executed_price == pytest.approx(1200.0)
+    acct = orch.account()
+    # fill @1200 on 5 BTC: pnl = +1000, fee = 5*1200*0.0004 = 2.40,
+    # wallet = margin 500 + pnl 1000 - fee 2.40
+    assert acct.futures_wallet_usdt == pytest.approx(1497.60, abs=0.01)
+    assert acct.futures_positions == []
+
+
 # ---------------------------------------------------------------------------
 # Free-balance spot <-> futures transfers + console command flows
 # ---------------------------------------------------------------------------
@@ -612,7 +700,7 @@ def test_condition_buy_adds_margin_not_sells(stack):
     pos = next(p for p in orch.account().futures_positions if p.symbol == "BTCUSDT")
     assert pos.quantity == pytest.approx(5.0)
     # arm an add-margin condition below the current price and drop to fire it
-    run(orch._do_add_condition({
+    run(orch.add_condition({
         "symbol": "BTCUSDT", "op": "BELOW", "price": 800.0,
         "side": "BUY", "amount_usdt": 600.0, "note": "add margin",
     }))
@@ -633,7 +721,7 @@ def test_condition_buy_adds_margin_not_sells(stack):
 
 def test_condition_buy_without_position_is_blocked(stack):
     orch, market, sim = stack
-    run(orch._do_add_condition({
+    run(orch.add_condition({
         "symbol": "BTCUSDT", "op": "BELOW", "price": 800.0,
         "side": "BUY", "amount_usdt": 300.0, "note": "",
     }))
@@ -648,7 +736,7 @@ def test_condition_buy_without_position_is_blocked(stack):
 
 def _arm_below(stack, price=800.0, amount=400.0):
     orch, market, sim = stack
-    run(orch._do_add_condition({
+    run(orch.add_condition({
         "symbol": "BTCUSDT", "op": "BELOW", "price": price,
         "side": "BUY", "amount_usdt": amount, "note": "",
     }))
@@ -692,7 +780,7 @@ def test_condition_armed_while_price_already_past_waits_for_fresh_crossing(stack
     orch, market, sim = stack
     _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)  # spare wallet
     # current BTC price is 1000; arm BELOW 1500 = already satisfied at arm time
-    run(orch._do_add_condition({
+    run(orch.add_condition({
         "symbol": "BTCUSDT", "op": "BELOW", "price": 1500.0,
         "side": "BUY", "amount_usdt": 300.0, "note": "",
     }))
@@ -707,18 +795,38 @@ def test_condition_armed_while_price_already_past_waits_for_fresh_crossing(stack
                if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
     assert next(iter(orch.conditions.values())).fires == 1
 
+def test_condition_defers_when_plan_pending_same_symbol(stack):
+    """#1: a fired condition must not stack a second action on a symbol that
+    already has a pending de-risk plan — the shot is consumed once (one-shot)
+    but nothing is queued on top of the existing plan."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=700.0)
+    market.prices["BTCUSDT"] = 920.0                     # into DANGER
+    run(orch.monitor_positions())                        # manual: plan queued
+    pend_before = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    assert pend_before, "de-risk plan must be pending first"
+    orch, market, sim = _arm_below(stack, price=900.0, amount=300.0)
+    market.prices["BTCUSDT"] = 850.0                     # fresh crossing below
+    run(orch.check_conditions())
+    cond = next(iter(orch.conditions.values()))
+    assert cond.active is False and cond.fires == 1, "one-shot still spent once"
+    pend_after = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    assert len(pend_after) == len(pend_before), "must not stack a second plan"
+    assert any(a.event == "condition_deferred" for a in orch.audit)
+
+
 def test_condition_rejects_invalid_price_or_amount(stack):
     """B12: conditions must carry a positive trigger price and a positive
     amount; nonsense payloads are refused with a readable message."""
     orch, market, sim = stack
     _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)
-    r = run(orch._do_add_condition({
+    r = run(orch.add_condition({
         "symbol": "BTCUSDT", "op": "BELOW", "price": 0.0,
         "side": "BUY", "amount_usdt": 300.0,
     }))
     assert r.intent == "add_condition" and "positive trigger price" in r.message
     assert not orch.conditions
-    r2 = run(orch._do_add_condition({
+    r2 = run(orch.add_condition({
         "symbol": "BTCUSDT", "op": "BELOW", "price": 800.0,
         "side": "BUY", "amount_usdt": -50.0,
     }))
