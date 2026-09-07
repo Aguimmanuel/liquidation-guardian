@@ -84,10 +84,14 @@ observe ──► analyze ──► decide ──► narrate ──► approve? 
   confirm-before-execute.
 - **act (automatic mode)** — a header toggle switches the orchestrator to
   automatic mode, but only after the user accepts an on-screen notice that
-  *agents can make mistakes*. Once consented, queued opens/closes, fired
-  conditions and danger-zone de-risks execute immediately (guardrails still
-  gate everything). The auto de-risk prefers the *reduce* (no extra capital)
-  and rejects the unchosen option. Switching back to Manual revokes consent.
+  *agents can make mistakes*. Once consented, queued opens/closes and fired
+  conditions execute immediately, and a background *auto-protect scan*
+  (`orchestrator.auto_protect_scan`, run by the server autopilot) watches
+  every open position: any that slips into the danger zone is de-risked on its
+  own, with no prompt required (guardrails still gate everything; the de-risk
+  prefers the *reduce* — no extra capital — and rejects the unchosen option,
+  and retries are throttled per symbol so a blocked attempt can't spam the
+  audit trail). Switching back to Manual revokes consent.
 - **execute** — `SimAdapter` (paper fills at mark price, simulated fees) or
   `MCPLiveAdapter` (Binance MCP server, real sub-account).
 - **audit** — every event appended to an in-memory audit trail, exposed via
@@ -121,8 +125,13 @@ value, max order size (for buys and margin adds — a *reduce* is exempt because
 closing exposure is the safe direction, like sells), daily trade cap,
 cooldown (autonomous actions only), leverage cap on opens, and
 cash/transfer sufficiency. The thresholds are user-editable at runtime
-(`app/agent/orchestrator.py` `update_guardrails`), and the daily-trade cap can
-be **locked for the current 24-hour window** as a self-discipline tripwire.
+(`app/agent/orchestrator.py` `update_guardrails`) and persisted to
+`data/guardrail_state.json`, so a profile survives restarts. The whole profile
+can be **locked for the current 24-hour window** as a self-discipline
+tripwire: while locked, loosening *any* limit is refused (a one-way ratchet —
+each limit has a known "loosening direction", see `LOOSEN_DIRECTION` in
+`config.py`), tightening is always allowed, and there is no early unlock; the
+lock auto-releases when the window completes.
 
 ## Intent handling
 
@@ -143,9 +152,13 @@ endpoints (`/api/trade/*`, `/api/tpsl`, `/api/guardrails`).
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (42 tests, no network —
+`tests/` covers the risk engine and feature surface (49 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
 distance and risk zones, `required_cut`/`required_margin`, guardrail semantics,
-text parsers, plus the feature tests: dynamic-leverage opens (cap, cash,
+text parsers, plus feature tests for: dynamic-leverage opens (cap, cash,
 opposite-side blocks, same-side averaging), TP/SL arming and automatic exits on
-both sides, the 24-hour trade window rollover, and guardrail editing/locking.
+both sides, the 24-hour trade window rollover, the profile commitment lock
+(loosening refused / tightening allowed, early unlock refused, expiry,
+persistence across restart), and the proactive auto-protect scan (manual-mode
+no-op, autonomous de-risk without a prompt, retry throttling, guardrails
+respected).

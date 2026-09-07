@@ -1,10 +1,11 @@
 # Liquidation Guardian
 
-A focused AI risk agent for [Binance Agent OS](https://www.binance.com/en/agent-os).
-It watches open USDⓈ-M futures positions, computes their liquidation risk live,
-and recommends de-risk actions before the exchange liquidates them. This is
-intentionally a narrow agent: it helps protect capital, not a general-purpose
-trading bot.
+A focused AI risk agent for [Binance Agent OS](https://www.binance.com/en/agent-os):
+it watches open USDⓈ-M futures positions against live market data, computes the
+real distance to each position's liquidation price, and proposes guardrailed
+de-risk actions — reduce leverage or add margin — before the exchange
+liquidates you. Intentionally narrow: a capital-protection agent for leveraged
+futures, not a general-purpose trading bot.
 
 ## What this agent does
 
@@ -19,11 +20,18 @@ positions from liquidation risk.
 - **Applies guardrails before action.** Every action is checked against size,
   wallet, leverage, cooldown, drawdown, and daily-budget rules.
 - **Keeps the human in the loop.** Default mode waits for explicit approval.
-  Automatic mode can act only after a clear consent notice and still obeys all
-  guardrails.
+  Automatic mode watches your open positions around the clock and, when one
+  slips toward liquidation, de-risks it on its own — no prompt needed. It
+  engages only after a clear consent notice and still obeys all guardrails.
 - **Adds contextual analysis when useful.** A per-coin market read can help the
   operator understand trend, support/resistance, and whether risk should be
   reduced or preserved.
+- **A risk profile you can lock for 24 hours.** Every limit — danger/warn
+  zones, de-risk target, order size, leverage cap, cooldown, daily trade
+  budget — is editable in the UI and persists across restarts. **Lock the
+  profile** to commit: while locked you can still make any limit *stricter*,
+  but loosening any limit is refused (a one-way ratchet) until the 24-hour
+  window ends. There is no early unlock, by design.
 
 This scope is deliberate. The project is not trying to be a broad autonomous
 trading system; it is an AI risk agent for futures protection and staged
@@ -40,22 +48,24 @@ The agent is a risk manager, not a gambler.
 ## Quickstart
 
 ```bash
-pip install -r requirements.txt
-python -m uvicorn app.main:app --port 8000
+./run.sh        # macOS / Linux
+run.bat         # Windows
 ```
 
-Open http://localhost:8000. The app starts with a $10,000 paper account (dark
-theme is the default; the header toggle persists your choice).
+or by hand: `pip install -r requirements.txt`, then
+`python -m uvicorn app.main:app --port 8000`.
 
-**Demo mode:** This project is intentionally configured to run in `sim` mode.
-It uses a paper account with live public market prices and does not require
-Binance credentials. Keep `RS_MODE=sim` for demos, testing, and local use.
+Open http://localhost:8000. The app starts in **sim mode** with a $10,000 paper
+account priced off live Binance market data — no Binance account or credentials
+needed to explore every feature. The identical agent loop runs against the real
+Binance Agent OS when you switch to live (see below).
 
 ## Screenshots
 
 ![dashboard](docs/screenshots/dashboard.png)
 ![protect](docs/screenshots/protect.png)
 ![after reduce](docs/screenshots/after_reduce.png)
+![coin analysis](docs/screenshots/analysis.png)
 
 Suggested first run:
 
@@ -66,26 +76,42 @@ Suggested first run:
 3. Hit **📈 Market analysis** and pick a coin for the deep read.
 4. Say `protect my positions` — the guardian proposes reduce and add-margin.
 5. Approve the reduce: liquidation jumps from ~4.5% to ~15% headroom.
-6. Open **Guardrails**, tighten the daily trade budget and **Lock for 24h**.
+6. Open **Guardrails**, tighten the limits and **Lock profile** — then try
+   loosening one to watch the 24-hour one-way ratchet refuse it.
 7. Try the **⚡ Auto** agent mode and read the consent notice before enabling.
+   Let prices drift against your position: automatic mode de-risks it on its
+   own, without you asking.
 
-## Live mode status
+## Binance Agent OS / live mode
 
-Live mode is not the supported project workflow yet. It requires a funded
-Binance Agentic sub-account, MCP authentication, and verification against the
-account response schema. Do not set `RS_MODE=live` unless you are developing
-and testing the live adapter with a dedicated test account.
+The same agent loop runs against the real Binance Agent OS MCP server —
+`https://agent.binance.com/mcp/agentic` — through the official MCP Python SDK
+(`app/adapters/mcp_live.py`). The adapter connects over streamable HTTP,
+discovers the account and trade tools at runtime, and executes on a dedicated
+**Agentic sub-account**, the isolation model Binance enforces: you fund the
+sub-account manually, the agent has no withdrawal scope and can never pull
+funds from your main account, and every non-read action goes through Binance's
+confirm-before-execute flow.
 
-The live adapter (`app/adapters/mcp_live.py`) uses the official MCP Python SDK
-against `https://agent.binance.com/mcp/agentic`. It discovers the account and
-trade tools at runtime. Live execution is experimental and has not been
-validated against every Binance MCP account schema. The simulator remains the
-safe, supported path; it cannot move real funds or place real orders.
+Simulation is the default so the whole product runs with zero credentials and
+zero real orders (paper fills at live prices). To trade live:
+
+1. Create and fund an **Agentic sub-account** in Binance — the agent can only
+   use funds already inside that sub-account.
+2. `export RS_MODE=live` and start the app.
+3. On first use the MCP client discovers Binance's OAuth authorization endpoint
+   and opens the consent flow in your browser — or set `RS_MCP_ACCESS_TOKEN`
+   to a pre-issued token to skip it. Approve the requested account/trade
+   scopes, then confirm each order in Binance's confirm-before-execute screen.
+
+The adapter logs the tools and scopes it discovers on startup, so you can
+verify exactly what the live account exposes before placing any order. Start
+with a small amount in the sub-account and work up.
 
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 42 unit tests, no network needed
+python -m pytest tests/ -q            # 49 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```
@@ -128,9 +154,9 @@ main knobs:
 | `RS_SYMBOL_ALLOWLIST` | BTC,ETH,BNB,SOL | empty = allow any symbol |
 | `OPENAI_API_KEY` | — | optional: LLM narration + intent parsing |
 
-Guardrail values set from the UI apply for the running session (env vars are
-the defaults); the 24-hour budget lock is persisted to `data/guardrail_state.json`
-so it survives restarts and releases itself when its window completes.
+Env vars are the boot defaults only. Edits made in the UI — plus any profile
+lock — are persisted to `data/guardrail_state.json`, so your settings survive
+restarts; a locked profile releases itself when its 24-hour window completes.
 
 ## Notes
 
