@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+coverage.xml
+.coverage
+htmlcov/
+dist/
+build/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime state (demo portfolios)
+data/*.json
+
+# Logs and local output
+*.log
+*.out
+*.tmp
+*.bak
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+Thumbs.db
