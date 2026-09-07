@@ -17,10 +17,10 @@ positions from liquidation risk.
   OK / WATCH / DANGER based on its distance to liquidation.
 - **Explains the safest next step.** When a position gets dangerous, the agent
   proposes the two standard protection paths: reduce exposure or add margin.
-- **Applies guardrails before action.** Every action is checked against symbol
-  allowlist, dust minimums, leverage and cash rules — and protection is never
-  frozen by a calendar window, an order-size cap or a cooldown (removed on
-  purpose: they could block a de-risk mid-crash).
+- **Applies guardrails before action.** Every action is checked against the
+  symbol allowlist and cash/funds sufficiency — with nothing in the way that
+  could freeze a de-risk: no per-day budget, order-size cap, cooldown, dust
+  floor or leverage cap (all retired after proving decorative for protection).
 - **An always-on guardian.** It watches every open position around the clock
   in *both* modes, logs risk-zone changes (OK → WATCH → DANGER) as they
   happen, and escalates the moment one reaches the danger zone: in manual
@@ -31,24 +31,31 @@ positions from liquidation risk.
 - **Adds contextual analysis when useful.** A per-coin market read can help the
   operator understand trend, support/resistance, and whether risk should be
   reduced or preserved.
-- **An editable, persistent risk profile — nothing decorative.** Every knob
-  (danger/warn zones, de-risk target, leverage cap, min action value) genuinely
-  gates what the guardian does, is sanity-bounded, and survives restarts. No
-  per-day trade budget, order-size cap or cooldown: the guardian only
-  *protects*, so its actions are never frozen — a position in danger is
-  handled whenever it appears.
-- **Money flows both ways — nothing is trapped.** Under the positions table, a
-  funds control moves free balance between **spot** and the **futures wallet**
-  in either direction, by amount. A per-position `↩` releases excess margin
-  off an open position (bounded so it keeps its de-risk headroom and its
-  effective leverage never exceeds the cap). Only free balance moves — no
-  open position's margin is ever touched by the to/from control.
-- **The console is a real command line, not a chat toy.** Beyond “risk
-  report” / “status”, plain language drives the app: “open long BTC 500 at
-  10x”, “close BTC”, “close all my positions”, “add 200 margin to BTC”,
-  “release margin on BTC”, “move 500 to futures”, “set danger zone to 5%”,
-  “auto mode”. Everything still runs through the same guardrailed
-  propose-and-approve pipeline.
+- **An editable, persistent risk profile — nothing decorative.** Three knobs
+  remain (danger zone, watch zone, de-risk target) — the only thresholds that
+  genuinely change what the guardian does — sanity-bounded and persisted across
+  restarts. Everything else that used to look like a control (leverage cap, min
+  action value, order-size, cooldown, daily budget) is gone.
+- **Money flows both ways — nothing is trapped.** A funds control under the
+  positions table moves free balance between **spot** and the **futures
+  wallet** in either direction, by any amount you type (or all of it with
+  `max`). A per-position `↩` releases excess margin off an open position,
+  bounded so it keeps its de-risk headroom. Only free balance moves — no open
+  position's margin is ever touched by the to/from control.
+- **The console is a real command line, not a chat toy.** It sits directly
+  above Pending Proposals so you can act fast. Beyond “risk report” /
+  “status”, plain language drives the app: “open long BTC 500 at 10x”, “close
+  BTC”, “close all my positions”, “add 200 margin to BTC”, “release margin on
+  BTC”, “move 500 to futures”, “set danger zone to 5%”, “auto mode”. Set
+  `OPENAI_API_KEY` (any OpenAI-compatible endpoint) and the same console
+  becomes an open-ended agent: the model reads your live portfolio context,
+  answers questions in plain English, and still routes every action through
+  the same guardrailed propose-and-approve pipeline.
+- **Price conditions fire once per crossing, never on a loop.** Arm “if BTC
+  drops below 60,000, add 400 margin” and it triggers exactly once when price
+  crosses, then re-arms only after price returns through the trigger — a coin
+  that stays past the price can't spam the approval queue or drain cash in
+  auto mode.
 
 This scope is deliberate. The project is not trying to be a broad autonomous
 trading system; it is an AI risk agent for futures protection and staged
@@ -132,7 +139,7 @@ with a small amount in the sub-account and work up.
 ## Scripts and tests
 
 ```bash
-python -m pytest tests/ -q            # 69 unit tests, no network needed
+python -m pytest tests/ -q            # 71 unit tests, no network needed
 python scripts/backtest.py --days 90  # guardian vs no-guardian on real klines
 python scripts/demo.py                # scripted walkthrough of the agent loop
 ```
@@ -167,8 +174,6 @@ main knobs:
 | `RS_LIQ_WARN_PCT` | `0.10` | distance to liq below this = WATCH |
 | `RS_LIQ_DANGER_PCT` | `0.06` | distance to liq below this = DANGER → de-risk proposed |
 | `RS_LIQ_TARGET_DIST_PCT` | `0.15` | de-risk until 15% headroom |
-| `RS_MIN_TRADE_VALUE_USDT` | `10.0` | ignore dust-size orders (UI-editable) |
-| `RS_MAX_LEVERAGE` | `50` | leverage cap when opening trades (UI-editable) |
 | `RS_TICKER_TTL` | `1` | live-ticker refresh interval in seconds |
 | `RS_SYMBOL_ALLOWLIST` | BTC,ETH,BNB,SOL | empty = allow any symbol |
 | `OPENAI_API_KEY` | — | optional: LLM narration + intent parsing |

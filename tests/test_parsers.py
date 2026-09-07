@@ -99,10 +99,11 @@ def test_parse_rail_edits():
     r = parse_intent("set danger zone to 5%")
     assert r["intent"] == "rail_edit" and r["rail_key"] == "liq_danger_pct"
     assert r["rail_value"] == pytest.approx(0.05)
-    r2 = parse_intent("raise leverage cap to 30x")
-    assert r2["rail_key"] == "max_leverage" and r2["rail_value"] == 30.0
-    r3 = parse_intent("set min trade value to 20")
-    assert r3["rail_key"] == "min_trade_value_usdt" and r3["rail_value"] == 20.0
+    r2 = parse_intent("set de-risk target to 12%")
+    assert r2["rail_key"] == "liq_target_dist_pct" and r2["rail_value"] == pytest.approx(0.12)
+    # retired knobs are not editable through the console any more
+    assert parse_intent("raise leverage cap to 30x")["intent"] == "chat"
+    assert parse_intent("set min trade value to 20")["intent"] == "chat"
     # fractions work without a % sign too
     r4 = parse_intent("set watch zone to 0.08")
     assert r4["rail_key"] == "liq_warn_pct" and r4["rail_value"] == pytest.approx(0.08)

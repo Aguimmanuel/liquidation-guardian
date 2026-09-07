@@ -183,6 +183,13 @@ def parse_intent(message: str) -> dict[str, Any]:
     """
     m = message.lower().strip()
 
+    # --- guardrail edits (checked first: "de-risk target" shares wording with
+    # the protect intent, so an edit like "raise de-risk target to 15%" must
+    # not be swallowed by the "de-risk" protect trigger) -------------------
+    rail = _parse_rail_edit(m)
+    if rail:
+        return rail
+
     # --- read-only queries ------------------------------------------------
     if any(
         k in m
@@ -251,11 +258,6 @@ def parse_intent(message: str) -> dict[str, Any]:
     if any(k in m for k in ["auto mode", "automatic mode", "automatic agent",
                             "enable auto", "go auto", "auto agent"]):
         return {"intent": "agent_auto"}
-
-    # --- guardrail edits -----------------------------------------------------
-    rail = _parse_rail_edit(m)
-    if rail:
-        return rail
 
     # --- position margin moves ----------------------------------------------
     if any(k in m for k in ["release margin", "pull margin", "remove margin",
@@ -382,13 +384,7 @@ RAIL_ALIASES: dict[str, str] = {
     "de risk target": "liq_target_dist_pct",
     "headroom": "liq_target_dist_pct",
     "target distance": "liq_target_dist_pct",
-    "leverage cap": "max_leverage",
-    "max leverage": "max_leverage",
-    "min trade value": "min_trade_value_usdt",
-    "minimum trade": "min_trade_value_usdt",
-    "min action value": "min_trade_value_usdt",
-    "minimum order": "min_trade_value_usdt",
-    "minimum action": "min_trade_value_usdt",
+    "liquidation distance": "liq_target_dist_pct",
 }
 
 
@@ -422,9 +418,18 @@ def _parse_rail_edit(m: str) -> Optional[dict[str, Any]]:
 async def parse_intent_llm(
     config: AppConfig, message: str, targets: dict
 ) -> dict[str, Any]:
-    """Optional LLM intent parse; falls back to the rule-based parser."""
+    """Optional LLM intent parse; falls back to the rule-based parser.
+
+    ``targets`` doubles as portfolio context: when provided it is sent to the
+    model alongside the message so conversational answers ("what is my biggest
+    risk right now?") can be grounded in the real account state. When no key is
+    configured the deterministic parser handles the full command surface.
+    """
     if not config.openai_api_key:
         return parse_intent(message)
+    user = {"message": message}
+    if targets:
+        user["context"] = targets
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -434,41 +439,55 @@ async def parse_intent_llm(
                     "model": config.openai_model,
                     "messages": [
                         {"role": "system", "content": INTENT_CHECK_SYSTEM},
-                        {"role": "user", "content": json.dumps({"message": message})},
+                        {"role": "user", "content": json.dumps(user)[:6000]},
                     ],
                     "temperature": 0.0,
-                    "max_tokens": 300,
+                    "max_tokens": 400,
                 },
             )
             resp.raise_for_status()
             parsed = json.loads(resp.json()["choices"][0]["message"]["content"])
-            if isinstance(parsed, dict) and "intent" in parsed:
+            if isinstance(parsed, dict) and parsed.get("intent"):
+                return parsed
+            if isinstance(parsed, dict) and parsed.get("reply"):
+                parsed["intent"] = "chat"
                 return parsed
     except Exception:
         pass
     return parse_intent(message)
 
 
-INTENT_CHECK_SYSTEM = """You are a strict intent parser for a futures risk agent.
-From the user message, output ONLY JSON with keys chosen from:
-{"intent", "symbol", "side", "margin_usdt", "leverage", "amount_usdt",
- "direction", "close_all", "condition", "rail_key", "rail_value"}
-Allowed intents:
+INTENT_CHECK_SYSTEM = """You are the Liquidation Guardian's front brain — a futures
+risk-protection agent for Binance. The user just typed something into the console.
+Portfolio context is attached when available. Decide what they want and reply with
+ONE JSON object, nothing else.
+
+If the message is a COMMAND (open/close a position, add/release margin, move funds
+between spot and futures, arm a price condition, ask for risk/status/protect/analyze,
+switch agent mode, edit a danger/watch/de-risk threshold), output the matching command
+object with keys chosen from {"intent","symbol","side","margin_usdt","leverage",
+"amount_usdt","direction","close_all","condition","rail_key","rail_value"}:
 - "protect" for "protect my positions" / "de-risk now"
 - "risk" for "risk report" / "what's my liquidation risk"
 - "status" for "status" / "summary"
-- "market" for "analyze BTC" / "market analysis" (symbol optional)
-- "add_condition" for "if BTC drops below 60000 add 400 margin" (fill condition)
-- "open" for "open long BTC 500 at 10x" / "open short ETH 300" (side, symbol,
-  margin_usdt, leverage default 10)
+- "market" for "analyze BTC" (symbol optional)
+- "open" for "open long BTC 500 at 10x" (side, symbol, margin_usdt, leverage default 10)
 - "close" for "close BTC" or "close all my positions" (close_all true when all)
 - "add_margin" for "add 300 margin to BTC" (symbol, amount_usdt)
 - "release" for "release margin on BTC" (symbol)
 - "funds" for "move 500 to futures" / "move 500 to spot" (direction, amount_usdt)
+- "add_condition" for "if BTC drops below 60000 add 400 margin" (fill condition object)
 - "agent_auto" for "auto mode", "agent_manual" for "manual mode"
-- "rail_edit" for "set danger zone to 5%" (rail_key, rail_value)
-- else chat. Never invent numbers or symbols; set absent optional fields to
-  null/omit. Symbols are always "XXXUSDT"."""
+- "rail_edit" for "set danger zone to 5%" / "set watch zone to 8%" (rail_key,
+  rail_value) — only danger/watch/de-risk target are editable
+Never invent numbers or symbols not in the message; symbols are always "XXXUSDT".
+
+Otherwise (a question, greeting, or general chat), output {"intent":"chat",
+"reply":"<short, helpful answer>"}. Answer concisely using the attached context;
+you may explain concepts (liquidation price, margin, leverage). If the user seems
+to ask you to do something that is not a supported command, say what you can do and
+invite them. Never claim you executed an action — actions always need a command
+object and the operator's approval. Reply ONLY with the JSON object."""
 
 
 

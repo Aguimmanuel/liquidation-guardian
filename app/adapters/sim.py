@@ -368,7 +368,7 @@ class SimAdapter:
                     message="no mark price available to size the margin release",
                 )
             take = min(amount, releasable_margin(
-                fp, price, target, self.guardrails.max_leverage
+                fp, price, target
             ))
             if take < 1e-9:
                 return OrderResult(
@@ -428,7 +428,7 @@ class SimAdapter:
         state = self._state
         assert state is not None
         margin = proposal.open_margin_usdt
-        leverage = proposal.open_leverage or self.guardrails.max_leverage
+        leverage = proposal.open_leverage or 10.0  # explicit or default 10x
         price = proposal.est_price if proposal.est_price > 0 else 0.0
         if price <= 0:
             return OrderResult(

@@ -25,7 +25,6 @@ from app.agent.guardrails import (
     GuardrailConfig,
     check_futures_funds_sufficient,
     check_futures_position_exists,
-    check_min_trade_value,
     check_spot_funds_sufficient,
     check_symbol_allowed,
 )
@@ -272,7 +271,9 @@ class Orchestrator:
 
     # ------------------------------------------------------------ agent entry
     async def handle_message(self, message: str) -> AgentResponse:
-        intent_raw = await parse_intent_llm(self.config, message, {})
+        intent_raw = await parse_intent_llm(
+            self.config, message, self._llm_context()
+        )
         intent = intent_raw.get("intent", "chat")
         await self.refresh()
 
@@ -302,6 +303,15 @@ class Orchestrator:
             return self.set_agent_mode("manual")
         if intent == "rail_edit":
             return self._console_rail_edit(intent_raw)
+        # free-form chat: the LLM (when configured) supplies a grounded answer;
+        # otherwise we fall back to a compact status + command menu
+        if intent == "chat":
+            reply = intent_raw.get("reply") if isinstance(intent_raw, dict) else None
+            if isinstance(reply, str) and reply.strip():
+                return AgentResponse(
+                    message=reply.strip(), intent="chat", state=self.snapshot()
+                )
+            return await self._do_chat(message)
         return await self._do_chat(message)
 
     # ----------------------------------------------- console command actions
@@ -410,22 +420,22 @@ class Orchestrator:
         value = p.get("rail_value")
         if not key or value is None:
             return AgentResponse(
-                message="Say e.g. “set danger zone to 5%”, “raise the leverage cap to 30x” or "
-                "“set min action value to 20”.",
+                message="Say e.g. “set danger zone to 5%”, “watch zone to 8%” or "
+                "“de-risk target to 15%”.",
                 intent="rail_edit",
                 state=self.snapshot(),
             )
         if key not in EDITABLE_RAIL_KEYS:
             return AgentResponse(
                 message=f"“{key}” isn't an editable guardrail. Editable: danger zone, watch zone, "
-                "de-risk target, min action value, leverage cap.",
+                "and de-risk target.",
                 intent="rail_edit",
                 state=self.snapshot(),
             )
         resp = self.update_guardrails({key: value})
         return AgentResponse(
             message=resp.message,
-            intent="chat",
+            intent="guardrails",
             state=self.snapshot(),
         )
 
@@ -450,7 +460,6 @@ class Orchestrator:
             )
         await self.refresh()
         state = self.account()
-        floor = self.guardrails.min_trade_value_usdt
         if direction == "to_futures":
             source = "spot cash"
             have = state.cash_usdt
@@ -461,12 +470,9 @@ class Orchestrator:
             tkind = TransferKind.RETURN_WALLET
         if amount is None or amount <= 0:
             amount = have
-        if amount < floor - 1e-6:
+        if amount <= 1e-9:
             return AgentResponse(
-                message=(
-                    f"Nothing to move — {source} is ${have:,.2f}, below the "
-                    f"${floor:,.0f} minimum action value."
-                ),
+                message=f"Nothing to move — {source} is empty.",
                 intent="funds",
                 state=self.snapshot(),
             )
@@ -483,9 +489,6 @@ class Orchestrator:
             r = check_futures_funds_sufficient(state.futures_wallet_usdt, amount)
         if not r.ok:
             reasons.append(r.reason)
-        r2 = check_min_trade_value(amount, self.guardrails)
-        if not r2.ok:
-            reasons.append(r2.reason)
         if reasons:
             self.log(AuditLevel.GUARDRAIL, "fund_move_blocked", "; ".join(reasons))
             return AgentResponse(
@@ -606,7 +609,14 @@ class Orchestrator:
         )
 
     async def check_conditions(self) -> list[AgentResponse]:
-        """Evaluate armed conditions against live prices (called periodically)."""
+        """Evaluate armed conditions against live prices (called periodically).
+
+        Edge-triggered: a condition fires *once* when the price first crosses
+        its trigger, then re-arms only after the price comes back the other
+        way. Staying past the trigger never re-proposes or re-executes — that
+        would otherwise spam the approval queue (and drain cash in auto mode)
+        on every 2s poll while a coin simply trades beyond the price.
+        """
         if not self.conditions:
             return []
         try:
@@ -629,17 +639,21 @@ class Orchestrator:
             hit = (cond.op == ConditionOp.ABOVE and price >= cond.price) or (
                 cond.op == ConditionOp.BELOW and price <= cond.price
             )
-            if hit:
-                cond.fires += 1
-                cond.last_fired_at = utcnow()
-                self.log(
-                    AuditLevel.ACTION,
-                    "condition_fired",
-                    f"{cond.symbol} {cond.op.value} {cond.price} @ {price:.2f}",
-                )
-                resp = await self._propose_condition_trade(cond, price)
-                if resp:
-                    responses.append(resp)
+            if hit and cond._was_hit:
+                continue  # already fired on this crossing — do not re-fire
+            cond._was_hit = hit
+            if not hit:
+                continue  # armed again for the next crossing
+            cond.fires += 1
+            cond.last_fired_at = utcnow()
+            self.log(
+                AuditLevel.ACTION,
+                "condition_fired",
+                f"{cond.symbol} {cond.op.value} {cond.price} @ {price:.2f}",
+            )
+            resp = await self._propose_condition_trade(cond, price)
+            if resp:
+                responses.append(resp)
         return responses
 
     # -------------------------------------------------------------- intents
@@ -1024,7 +1038,6 @@ class Orchestrator:
         for result in (
             check_futures_position_exists(True, prop.symbol),
             check_symbol_allowed(prop.symbol, self.guardrails),
-            check_min_trade_value(prop.est_value_usdt, self.guardrails),
         ):
             if not result.ok:
                 reasons.append(result.reason)
@@ -1173,12 +1186,43 @@ class Orchestrator:
             "  • “move 500 to futures”  /  “move 500 to spot”",
             "  • “protect my positions”  /  “risk report”  /  “status”",
             "  • “analyze BTC”  /  “if BTC drops below 60000 add 400 margin”",
-            "  • “set danger zone to 5%”  /  “raise leverage cap to 30x”",
+            "  • “set danger zone to 5%”  /  “watch zone to 8%”  /  “de-risk target to 15%”",
             "  • “auto mode” (consent first)  /  “manual mode”",
         ]
         return AgentResponse(
             message="\n".join(lines), intent="chat", state=self.snapshot()
         )
+
+    def _llm_context(self) -> dict[str, Any]:
+        """Compact, serializable portfolio context for the LLM console brain —
+        lets open-ended questions be answered from the real account state."""
+        try:
+            st = self.account()
+        except Exception:
+            return {}
+        return {
+            "agent_mode": self.agent_mode,
+            "total_value_usdt": round(st.total_value_usdt, 2),
+            "spot_cash_usdt": round(st.cash_usdt, 2),
+            "futures_wallet_usdt": round(st.futures_wallet_usdt, 2),
+            "open_positions": [
+                {
+                    "symbol": p.symbol,
+                    "side": p.side.value,
+                    "quantity": p.quantity,
+                    "margin_usdt": round(p.margin_usdt, 2),
+                    "liq_price": p.liq_price,
+                    "distance_pct": round(p.distance_pct * 100, 1),
+                    "risk": p.risk.value,
+                }
+                for p in st.futures_positions
+            ],
+            "pending_proposals": sum(
+                1 for p in self.proposals.values() if p.status.value == "PENDING"
+            ),
+            "armed_conditions": len(self.conditions),
+            "guardrail_values": self.guardrail_status().get("values", {}),
+        }
 
     # ------------------------------------------------------------- approvals
     def decide(self, proposal_id: str, approve: bool) -> AgentResponse:
@@ -1582,13 +1626,10 @@ class Orchestrator:
             check_symbol_allowed(symbol, self.guardrails).ok,
             f"{symbol} is not on the approved list",
         )
+        _note(margin_usdt > 0, "margin must be a positive amount")
         _note(
-            margin_usdt >= self.guardrails.min_trade_value_usdt,
-            f"margin ${margin_usdt:,.0f} is below the ${self.guardrails.min_trade_value_usdt:,.0f} minimum",
-        )
-        _note(
-            0 < leverage <= self.guardrails.max_leverage,
-            f"leverage must be between 1x and {self.guardrails.max_leverage:.0f}x",
+            leverage > 0,
+            "leverage must be a positive number of x",
         )
         _note(
             state.cash_usdt >= margin_usdt,
@@ -1740,10 +1781,9 @@ class Orchestrator:
         moved back to spot, or None when nothing can be released.
 
         Releasing is only offered while the position keeps at least the
-        configured de-risk headroom and stays within the leverage cap (see
-        ``risk.releasable_margin``), and only if the de-risk target is above
-        the watch zone (otherwise "releasing to target" could itself leave the
-        position in a warning state).
+        configured de-risk headroom (see ``risk.releasable_margin``), and only
+        if the de-risk target is above the watch zone (otherwise "releasing to
+        target" could itself leave the position in a warning state).
         """
         target = self.guardrails.liq_target_dist_pct
         if target <= self.guardrails.liq_warn_pct:
@@ -1751,8 +1791,8 @@ class Orchestrator:
         mark = pos.mark_price or pos.entry_price
         if pos.quantity <= 0 or pos.margin_usdt <= 0 or mark <= 0:
             return None
-        rel = releasable_margin(pos, mark, target, self.guardrails.max_leverage)
-        if rel < self.guardrails.min_trade_value_usdt - 1e-9:
+        rel = releasable_margin(pos, mark, target)
+        if rel <= 0:
             return None
         return round(rel, 2)
 
@@ -1766,13 +1806,9 @@ class Orchestrator:
         await self.refresh()
         state = self.account()
         amount = round(state.futures_wallet_usdt, 2)
-        floor = self.guardrails.min_trade_value_usdt
-        if amount < floor - 1e-6:
+        if amount <= 1e-9:
             return AgentResponse(
-                message=(
-                    f"Nothing to return — free futures balance is ${amount:,.2f} "
-                    f"(below the ${floor:,.0f} minimum action value)."
-                ),
+                message="Nothing to return — the free futures balance is empty.",
                 intent="return",
                 state=self.snapshot(),
             )
@@ -1824,9 +1860,9 @@ class Orchestrator:
     async def release_margin_to_spot(self, symbol: str) -> AgentResponse:
         """Pull the excess margin off an open position back to spot.
 
-        Bounded so the position keeps at least the configured de-risk headroom
-        and never exceeds the leverage cap — releasing can only ever leave the
-        position back at its normal protected state, never in danger.
+        Bounded so the position keeps at least the configured de-risk headroom —
+        releasing can only ever leave the position back at its normal protected
+        state, never in danger.
         """
         symbol = symbol.upper()
         await self.refresh()
@@ -1876,9 +1912,9 @@ class Orchestrator:
             reason=(
                 f"{pos.side.value} {symbol} sits {pos.distance_pct * 100:.1f}% from "
                 f"liquidation with ${pos.margin_usdt:,.2f} margin. The margin above "
-                f"what keeps {target * 100:.0f}% headroom (within the leverage cap) "
-                f"is idle insurance — release ${amount:,.2f} back to spot and the "
-                f"position keeps ≥ {target * 100:.0f}% headroom."
+                f"what keeps {target * 100:.0f}% headroom is idle insurance — "
+                f"release ${amount:,.2f} back to spot and the position keeps "
+                f"≥ {target * 100:.0f}% headroom."
             ),
         )
         self.proposals[prop.id] = prop
@@ -2048,8 +2084,6 @@ class Orchestrator:
                 "liq_warn_pct": g.liq_warn_pct,
                 "liq_danger_pct": g.liq_danger_pct,
                 "liq_target_dist_pct": g.liq_target_dist_pct,
-                "min_trade_value_usdt": g.min_trade_value_usdt,
-                "max_leverage": g.max_leverage,
             },
             "symbol_allowlist": list(g.symbol_allowlist),
         }
@@ -2127,8 +2161,6 @@ class Orchestrator:
         """Human-friendly formatting for a guardrail value (messages/audit)."""
         if key.endswith("_pct"):
             return f"{v * 100:g}%"
-        if key == "max_leverage":
-            return f"{v:g}x"
         return f"{v:g}"
 
     # ---------------------------------------------------------------- helpers

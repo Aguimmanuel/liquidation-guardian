@@ -5,17 +5,18 @@ filtered through this engine, mirroring how Binance Agent OS keeps agents
 inside a dedicated sub-account with user-set permissions: no withdrawals, hard
 caps, and confirm-before-execute.
 
-The guardian only *protects* — it never opens positions for profit and never
-caps protective action by calendar or portfolio-size rules. (A legacy per-day
-trade budget, and a max-order-size/cooldown pair that could freeze a de-risk
-mid-crash, were removed.) What remains gates the flows that actually run:
-allowed symbols, dust-sized actions, cash/transfer sufficiency, and the
-existence of the position being protected.
+The guardian only *protects*, so nothing here may ever freeze a protective
+action. Retired on purpose: a per-day trade budget, max-order-size, cooldown,
+a dust minimum, and a leverage cap — each proved decorative for a protection
+agent (they could block or gate nothing that actually protects you), so they
+are gone. What remains are the checks the flows truly run: allowed symbols,
+cash/transfer sufficiency, and the existence of the position being protected.
 
 Each check returns a `CheckResult` — (ok, reason). A failing check NEVER throws;
 it produces a transparent, human-readable block reason that is surfaced in the
 UI and the audit trail. Transparency is a feature, not an afterthought.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -45,28 +46,6 @@ def check_symbol_allowed(symbol: str, cfg: GuardrailConfig) -> CheckResult:
         ok,
         "symbol_allowlist",
         "" if ok else f"{symbol} is not on the approved symbol list",
-    )
-
-
-def check_min_trade_value(value_usdt: float, cfg: GuardrailConfig) -> CheckResult:
-    ok = value_usdt >= cfg.min_trade_value_usdt - 1e-6
-    return CheckResult(
-        ok,
-        "min_trade_value",
-        "" if ok else f"order value ${value_usdt:,.2f} is below the ${cfg.min_trade_value_usdt:,.2f} minimum",
-    )
-
-
-def check_cash_sufficient(
-    cash_usdt: float,
-    buy_value_usdt: float,
-    cfg: GuardrailConfig,
-) -> CheckResult:
-    ok = cash_usdt >= buy_value_usdt * (1.0 + cfg.fee_rate)
-    return CheckResult(
-        ok,
-        "cash_sufficient",
-        "" if ok else f"insufficient cash: need ${buy_value_usdt * (1 + cfg.fee_rate):,.2f}, have ${cash_usdt:,.2f}",
     )
 
 

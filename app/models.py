@@ -286,6 +286,10 @@ class Condition:
     created_at: datetime = field(default_factory=utcnow)
     last_fired_at: Optional[datetime] = None
     fires: int = 0
+    # Edge-trigger latch: remembers the last crossing state so a condition
+    # fires once per price crossing instead of re-proposing on every 2s poll
+    # while the market simply stays past the trigger price.
+    _was_hit: bool = field(default=False, init=False, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {

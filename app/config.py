@@ -16,13 +16,13 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 # The numeric limits a user can edit from the UI/API and that are persisted
-# with the profile (survive restarts).
+# with the profile (survive restarts). Kept deliberately minimal: the three
+# liquidation-zone thresholds. Min order value and leverage-cap proved to be
+# decorative (nothing protective ever needed them) and were removed.
 EDITABLE_RAIL_KEYS: tuple[str, ...] = (
     "liq_warn_pct",
     "liq_danger_pct",
     "liq_target_dist_pct",
-    "min_trade_value_usdt",
-    "max_leverage",
 )
 
 # Numeric sanity bounds applied on every guardrail edit (kept in one place so
@@ -31,8 +31,6 @@ RAIL_BOUNDS: dict[str, tuple[float, float]] = {
     "liq_warn_pct": (0.0, 1.0),
     "liq_danger_pct": (0.0, 1.0),
     "liq_target_dist_pct": (0.0, 1.0),
-    "min_trade_value_usdt": (0.0, float("inf")),
-    "max_leverage": (1.0, 125.0),  # Binance USDⓈ-M hard max
 }
 
 
@@ -44,11 +42,6 @@ RAIL_BOUNDS: dict[str, tuple[float, float]] = {
 
 @dataclass
 class GuardrailConfig:
-    # The two remaining runtime knobs both gate flows the app actually runs:
-    # min_trade_value_usdt floors dust-sized actions and max_leverage caps the
-    # leverage used when opening a position (and bounds margin release).
-    min_trade_value_usdt: float = 10.0  # ignore dust-sized orders
-    max_leverage: float = 50.0  # cap when opening a position (UI enforces <= this)
     # -- liquidation protection (futures) --
     liq_warn_pct: float = 0.10  # distance to liq below this = WATCH
     liq_danger_pct: float = (
@@ -71,14 +64,12 @@ class GuardrailConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "min_trade_value_usdt": self.min_trade_value_usdt,
             "symbol_allowlist": self.symbol_allowlist,
             "fee_rate": self.fee_rate,
             "liq_warn_pct": self.liq_warn_pct,
             "liq_danger_pct": self.liq_danger_pct,
             "liq_target_dist_pct": self.liq_target_dist_pct,
             "futures_fee_rate": self.futures_fee_rate,
-            "max_leverage": self.max_leverage,
         }
 
 
@@ -182,7 +173,6 @@ def load_config() -> AppConfig:
 def load_guardrails() -> GuardrailConfig:
     """Build the guardrail config from environment (independent of app config)."""
     return GuardrailConfig(
-        min_trade_value_usdt=_env_float("RS_MIN_TRADE_VALUE_USDT", 10.0),
         symbol_allowlist=_env_list(
             "RS_SYMBOL_ALLOWLIST", ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
         ),
@@ -191,7 +181,6 @@ def load_guardrails() -> GuardrailConfig:
         liq_danger_pct=_env_float("RS_LIQ_DANGER_PCT", 0.06),
         liq_target_dist_pct=_env_float("RS_LIQ_TARGET_DIST_PCT", 0.15),
         futures_fee_rate=_env_float("RS_FUTURES_FEE_RATE", 0.0004),
-        max_leverage=_env_float("RS_MAX_LEVERAGE", 50.0),
         mcp_url=os.environ.get("RS_MCP_URL", "https://agent.binance.com/mcp/agentic"),
         mcp_access_token=os.environ.get("RS_MCP_ACCESS_TOKEN", ""),
     )

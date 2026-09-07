@@ -166,24 +166,18 @@ def releasable_margin(
     pos: FuturesPosition,
     mark_price: float,
     target_dist: float,
-    max_leverage: float,
 ) -> float:
     """USDT of margin that can be safely pulled off an open position and moved
     back to spot.
 
-    Two ceilings bound the release so it can never recreate risk:
-      - the position must stay at least ``target_dist`` away from liquidation,
-      - its effective leverage must never exceed ``max_leverage``
-        (notional / margin). Both use the deterministic isolated-margin model.
+    The release is bounded by one rule: the position must stay at least
+    ``target_dist`` away from liquidation (isolated-margin model). No leverage
+    cap applies — a retired, decorative knob that never protected anything.
     Returns 0.0 when nothing can be released.
     """
     if pos.quantity <= 0 or pos.margin_usdt <= 0:
         return 0.0
-    keep_for_headroom = margin_for_target(pos, mark_price, target_dist)
-    keep_for_leverage = (
-        (pos.entry_price * pos.quantity) / max_leverage if max_leverage > 0 else 0.0
-    )
-    keep = max(keep_for_headroom, keep_for_leverage)
+    keep = margin_for_target(pos, mark_price, target_dist)
     return round(max(0.0, pos.margin_usdt - keep - 1e-9), 2)
 
 

@@ -126,14 +126,15 @@ assumption:
 ## Guardrail engine (`agent/guardrails.py`)
 
 The guardrail engine keeps only checks that protect without ever freezing a
-de-risk: symbol allowlist, min action value (dust floor), spot-cash/transfer
-sufficiency, and position existence. Removed on purpose: the per-day trade
-budget, an order-size cap, and a cooldown — each could block protective action
-at the exact moment a crash needed it, so the guardian is never capped by a
-calendar window or a portfolio-size rule. The user-editable knobs left in the
-UI (danger/warn zones, de-risk target, leverage cap, min action value) all
-genuinely gate flows, are sanity-bounded (`RAIL_BOUNDS`) and persist to
-`data/guardrail_state.json`.
+de-risk: symbol allowlist, spot-cash/transfer sufficiency, and position
+existence. Removed on purpose — after an audit showed each was decorative for
+a protection agent — the per-day trade budget, an order-size cap, a cooldown,
+a dust minimum (min action value), and a leverage cap. None of them could
+block a protective de-risk, but all of them *could* have frozen one mid-crash,
+so the guardian is capped by nothing except cash reality and the symbol list.
+The only user-editable knobs left in the UI are the three liquidation-zone
+thresholds (danger zone, watch zone, de-risk target) — sanity-bounded
+(`RAIL_BOUNDS`) and persisted to `data/guardrail_state.json`.
 
 Money movement is two-way. Transfers are a single proposal kind with a
 `transfer_kind` discriminator: `ADD_MARGIN` (spot → position margin, the
@@ -142,23 +143,32 @@ de-risk top-up), `DEPOSIT_FUTURES` (spot cash → free futures wallet),
 margin on an open position → spot). Free-balance moves never touch an open
 position's margin; the release size is bounded by `risk.releasable_margin`,
 which keeps the position at least at its de-risk headroom
-(`liq_target_dist_pct`) **and** its effective leverage under the configured
-cap — so moving money back out can never recreate the liquidation risk the
-guardian exists to prevent. Releasing is refused outright while the de-risk
-target is set at or below the watch zone.
+(`liq_target_dist_pct`) — so moving money back out can never recreate the
+liquidation risk the guardian exists to prevent. Releasing is refused
+outright while the de-risk target is set at or below the watch zone.
 
 ## Intent handling
 
-User messages are parsed to an intent by a deterministic keyword parser
-(`protect | risk | status | market | add_condition | open | close | add_margin |
-release | funds | agent_auto | agent_manual | rail_edit | chat`), with an
-optional LLM parser when a key is configured. Decisions never depend on the
-LLM — the same intents drive the console and the JSON endpoints
-(`/api/trade/*`, `/api/return`, `/api/funds/transfer`, `/api/tpsl`,
-`/api/guardrails`), so a command typed in the console does exactly what its
-button does. Conditions fire through the same guardrailed proposal path: a
-BUY ("add margin") condition becomes a real margin transfer to the open
-position (it never sells the position), and a SELL condition reduces it.
+The console is a real command surface, not a fixed menu. Every message is
+parsed by a deterministic keyword parser (`protect | risk | status | market |
+add_condition | open | close | add_margin | release | funds | agent_auto |
+agent_manual | rail_edit | chat`) — always available, no key needed. When an
+OpenAI-compatible key is configured (`OPENAI_API_KEY`), an LLM does the same
+job far more flexibly: it receives a compact portfolio snapshot as context,
+maps open-ended commands to the exact same JSON intent schema, and answers
+genuine questions with grounded plain-language replies. Any model endpoint
+works (OpenAI, Groq, OpenRouter… or an Agent OS-hosted model), and decisions
+never depend on the LLM — it only classifies and chats; every action still
+flows through the guardrailed propose/approve pipeline, exactly as its button
+does (`/api/trade/*`, `/api/return`, `/api/funds/transfer`, `/api/tpsl`,
+`/api/guardrails`).
+
+Price conditions are edge-triggered: a condition fires *once* when price first
+crosses the trigger, then re-arms only after price returns through it — so a
+coin that simply stays past the trigger can never re-propose or re-execute on
+every monitor poll (no approval-queue spam, no auto-mode cash drain). A BUY
+("add margin") condition becomes a real margin transfer to the open position
+(it never sells the position); a SELL condition reduces it.
 
 ## Security model
 
@@ -171,7 +181,7 @@ position (it never sells the position), and a SELL condition reduces it.
 
 ## Testing
 
-`tests/` covers the risk engine and feature surface (69 tests, no network —
+`tests/` covers the risk engine and feature surface (71 tests, no network —
 everything runs against a fake market feed): liq price for long and short,
 distance and risk zones, `required_cut`/`required_margin`, `margin_for_target`/
 `releasable_margin`, the guardrail checks, the plain-language console parser,
@@ -179,5 +189,7 @@ plus feature tests for: dynamic-leverage opens, TP/SL automatic exits, the
 always-on monitor (manual escalation queue, autonomous auto de-risk, retry
 throttling), the funds round trip in both directions (spot ↔ futures wallet by
 amount, bounded per-position margin release), console-driven open → add-margin
-→ transfer → close lifecycles, the fixed add-margin condition semantics, and
-the deliberate absence of any per-day budget / order-size cap / cooldown.
+→ transfer → close lifecycles, the fixed add-margin condition semantics, the
+edge-triggered conditions (one fire per crossing, re-arm on return), and the
+deliberate absence of any per-day budget / order-size cap / cooldown / dust
+floor / leverage cap.

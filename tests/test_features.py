@@ -136,10 +136,12 @@ def test_open_dynamic_leverage_matters(stack):
     assert pos.leverage == pytest.approx(25.0)
 
 
-def test_open_blocked_by_leverage_cap_and_cash(stack):
+def test_open_rejects_invalid_margin_and_insufficient_cash(stack):
+    """A degenerate open is refused (no dust floor / leverage cap any more, but
+    a zero margin or unpayable margin can never go through)."""
     orch, market, sim = stack
-    blocked = run(orch.queue_open("BTCUSDT", "LONG", 500.0, 999.0))
-    assert "blocked" in blocked.message.lower()
+    bad = run(orch.queue_open("BTCUSDT", "LONG", 0.0, 10.0))
+    assert "blocked" in bad.message.lower()
     broke = run(orch.queue_open("ETHUSDT", "LONG", 99_999.0, 10.0))
     assert "blocked" in broke.message.lower()
 
@@ -283,12 +285,12 @@ def test_release_refused_when_nothing_excess_and_target_misconfigured(stack):
 
 def test_guardrail_edits_surface_in_snapshot(stack):
     orch, market, sim = stack
-    orch.update_guardrails({"liq_danger_pct": 0.05, "max_leverage": 20})
+    orch.update_guardrails({"liq_danger_pct": 0.05, "liq_target_dist_pct": 0.20})
     gs = orch.guardrail_status()
     assert gs["values"]["liq_danger_pct"] == pytest.approx(0.05)
-    assert gs["values"]["max_leverage"] == pytest.approx(20.0)
+    assert gs["values"]["liq_target_dist_pct"] == pytest.approx(0.20)
     snap = orch.snapshot()
-    assert snap["guardrails"]["max_leverage"] == 20.0
+    assert snap["guardrails"]["liq_target_dist_pct"] == pytest.approx(0.20)
 
 
 def test_market_analysis_prompts_then_reports(stack):
@@ -392,9 +394,9 @@ def test_daily_budget_and_24h_lock_are_gone(stack):
 
 def test_guardrail_edits_reject_out_of_bounds(stack):
     orch, market, sim = stack
-    bad = orch.update_guardrails({"max_leverage": 9999.0})
+    bad = orch.update_guardrails({"liq_target_dist_pct": 5.0})  # > 1.0 = 100% bound
     assert "must stay within" in bad.message
-    assert orch.guardrails.max_leverage == 50.0
+    assert orch.guardrails.liq_target_dist_pct == pytest.approx(0.15)
     nan = orch.update_guardrails({"liq_danger_pct": float("nan")})
     assert "not a finite number" in nan.message
 
@@ -402,16 +404,15 @@ def test_guardrail_edits_reject_out_of_bounds(stack):
 def test_profile_values_persist_across_restart(stack, tmp_path):
     """Edits survive a restart (env defaults no longer win)."""
     orch, market, sim = stack
-    orch.update_guardrails({"liq_danger_pct": 0.05, "max_leverage": 25.0, "min_trade_value_usdt": 25.0})
+    orch.update_guardrails({"liq_danger_pct": 0.05, "liq_target_dist_pct": 0.22})
 
     from app.agent.orchestrator import Orchestrator
     from app.config import GuardrailConfig
 
-    g2 = GuardrailConfig()  # fresh env defaults (liq_danger 0.06, lev 50, min 10)
+    g2 = GuardrailConfig()  # fresh env defaults (danger 0.06, target 0.15)
     orch2 = Orchestrator(orch.config, g2, sim, market)
     assert g2.liq_danger_pct == pytest.approx(0.05)
-    assert g2.max_leverage == pytest.approx(25.0)
-    assert g2.min_trade_value_usdt == pytest.approx(25.0)
+    assert g2.liq_target_dist_pct == pytest.approx(0.22)
 
 
 def _open_danger_long(orch):
@@ -618,6 +619,75 @@ def test_condition_buy_without_position_is_blocked(stack):
     assert any(a.event == "condition_blocked" for a in orch.audit)
 
 
+def _arm_below(stack, price=1500.0, amount=400.0):
+    orch, market, sim = stack
+    run(orch._do_add_condition({
+        "symbol": "BTCUSDT", "op": "BELOW", "price": price,
+        "side": "BUY", "amount_usdt": amount, "note": "",
+    }))
+    return orch, market, sim
+
+
+def test_condition_fires_once_per_crossing_not_every_poll(stack):
+    """Regression: a condition whose price stays past the trigger must fire
+    once, then stay silent on every later poll until the price re-crosses —
+    it can never re-queue/re-execute in an infinite loop."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0)
+    orch, market, sim = _arm_below(stack)
+    market.prices["BTCUSDT"] = 1400.0                      # first crossing below
+    run(orch.check_conditions())
+    assert sum(1 for p in orch.proposals.values()
+               if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
+    # market simply stays below: five more guardian sweeps, zero new proposals
+    for _ in range(5):
+        run(orch.check_conditions())
+    assert sum(1 for p in orch.proposals.values()
+               if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
+    cond = next(iter(orch.conditions.values()))
+    assert cond.fires == 1
+
+
+def test_condition_rearms_after_price_returns(stack):
+    """After the price comes back above the trigger, the same crossing fires
+    the condition again — the latch is an edge detector, not a one-shot."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0)
+    orch, market, sim = _arm_below(stack)
+    market.prices["BTCUSDT"] = 1400.0
+    run(orch.check_conditions())                           # fire #1
+    pending1 = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    assert len(pending1) == 1
+    market.prices["BTCUSDT"] = 2000.0                      # back above
+    run(orch.check_conditions())                           # latch re-arms (no fire)
+    market.prices["BTCUSDT"] = 1400.0                      # crossing again
+    run(orch.check_conditions())
+    pending2 = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
+    assert len(pending2) == 2
+    cond = next(iter(orch.conditions.values()))
+    assert cond.fires == 2
+
+
+def test_condition_auto_mode_does_not_drain_cash_on_stale_trigger(stack):
+    """In auto mode the worst failure is draining cash each poll; the edge
+    trigger means a stuck-below price executes exactly once."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0)          # cash 9500
+    orch, market, sim = _arm_below(stack, price=1500.0, amount=400.0)
+    run(orch.handle_message("I understand - enable auto"))
+    market.prices["BTCUSDT"] = 1400.0
+    run(orch.check_conditions())                           # auto executes one margin add
+    acct = orch.account()
+    pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
+    assert pos.margin_usdt == pytest.approx(900.0)         # exactly one +400
+    for _ in range(3):
+        run(orch.check_conditions())                       # stays below — nothing more
+    acct = orch.account()
+    pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
+    assert pos.margin_usdt == pytest.approx(900.0)
+    assert acct.cash_usdt == pytest.approx(9100.0)
+
+
 def test_console_open_margin_transfer_close_end_to_end(stack):
     """Plain-language console commands drive the whole lifecycle."""
     orch, market, sim = stack
@@ -653,10 +723,10 @@ def test_console_open_margin_transfer_close_end_to_end(stack):
 def test_console_rail_edits_and_agent_mode(stack):
     orch, market, sim = stack
     r = run(orch.handle_message("set danger zone to 5%"))
-    assert r.intent == "chat" or r.intent == "rail_edit"
+    assert r.intent in ("chat", "rail_edit", "guardrails")
     assert orch.guardrails.liq_danger_pct == pytest.approx(0.05)
-    r2 = run(orch.handle_message("raise leverage cap to 30x"))
-    assert orch.guardrails.max_leverage == pytest.approx(30.0)
+    r2 = run(orch.handle_message("set de-risk target to 12%"))
+    assert orch.guardrails.liq_target_dist_pct == pytest.approx(0.12)
     # auto needs explicit consent phrase
     r3 = run(orch.handle_message("auto mode"))
     assert orch.agent_mode == "manual"           # not enabled without consent
@@ -672,10 +742,23 @@ def test_rails_snapshot_exact_shape(stack):
     gs = orch.guardrail_status()
     assert set(gs["values"].keys()) == {
         "liq_warn_pct", "liq_danger_pct", "liq_target_dist_pct",
-        "min_trade_value_usdt", "max_leverage",
     }
-    assert "max_trade_pct" not in gs["values"]
-    assert "cooldown_seconds" not in gs["values"]
-    assert "budget" not in gs
-    assert not hasattr(orch.guardrails, "cooldown_seconds")
-    assert not hasattr(orch.guardrails, "max_trade_pct")
+    for gone in ("max_trade_pct", "cooldown_seconds", "budget",
+                 "min_trade_value_usdt", "max_leverage"):
+        assert gone not in gs["values"], gone
+    for gone in ("cooldown_seconds", "max_trade_pct",
+                 "min_trade_value_usdt", "max_leverage"):
+        assert not hasattr(orch.guardrails, gone), gone
+
+
+def test_small_typed_funds_transfer_is_allowed(stack):
+    """A typed, non-max amount works and no dust floor blocks it — regression
+    guard for the retired min-action-value knob and the wallet transfer UI."""
+    orch, market, sim = stack
+    r = run(orch.transfer_balance("to_futures", 2.5))
+    assert r.proposals and r.proposals[0]["transfer_kind"] == "DEPOSIT_FUTURES"
+    assert r.proposals[0]["est_value_usdt"] == pytest.approx(2.5)
+    orch.decide(r.proposals[0]["id"], True)
+    acct = orch.account()
+    assert acct.futures_wallet_usdt == pytest.approx(2.5)
+    assert acct.cash_usdt == pytest.approx(9997.5)

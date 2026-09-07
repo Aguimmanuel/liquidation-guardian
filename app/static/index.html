@@ -13,81 +13,81 @@
 })();
 </script>
 <style>
+  /* ------- Binance Futures-style theme (dark default, light optional) ------- */
   :root{
-    --bg:#0a0f1e; --bg2:#0d1426; --panel:#111a30; --panel2:#0d1526; --line:#20304f;
-    --txt:#e9eef8; --mut:#8fa2c4; --dim:#5c6b90;
-    --grn:#22d39f; --grnbg:rgba(34,211,159,.12);
-    --red:#ff5d73; --redbg:rgba(255,93,115,.12);
-    --amb:#f5b544; --ambbg:rgba(245,181,68,.13);
-    --blu:#4d9fff; --blubg:rgba(77,159,255,.13);
-    --hdr:rgba(10,15,30,.82);
-    --rad:14px; --sh:0 10px 30px rgba(0,0,0,.35); --chrome-height:104px;
+    --bg:#0b0e11; --bg2:#181a20; --panel:#181a20; --panel2:#1e2329; --line:#2b3139;
+    --txt:#eaecef; --mut:#848e9c; --dim:#5e6673;
+    --grn:#0ecb81; --grnbg:rgba(14,203,129,.12);
+    --red:#f6465d; --redbg:rgba(246,70,93,.12);
+    --amb:#f0b90b; --ambbg:rgba(240,185,11,.12);
+    --blu:#f0b90b; --blubg:rgba(240,185,11,.14);
+    --hdr:#0b0e11;
+    --rad:8px; --sh:0 6px 18px rgba(0,0,0,.28);
+    --font:-apple-system,BlinkMacSystemFont,"Inter","Trebuchet MS",Roboto,Ubuntu,"Segoe UI",Helvetica,Arial,sans-serif;
   }
   html[data-theme="light"]{
-    --bg:#e9edf6; --bg2:#eef1f8; --panel:#ffffff; --panel2:#f4f6fc; --line:#d5dcec;
-    --txt:#18213a; --mut:#57688c; --dim:#8b97b0;
-    --grn:#0aa372; --grnbg:rgba(10,163,114,.1);
-    --red:#d92e4c; --redbg:rgba(217,46,76,.08);
-    --amb:#a86b00; --ambbg:rgba(196,128,16,.12);
-    --blu:#1f66d6; --blubg:rgba(31,102,214,.08);
-    --hdr:rgba(255,255,255,.88);
-    --sh:0 10px 26px rgba(24,33,58,.12);
+    --bg:#fafafa; --bg2:#eaecef; --panel:#ffffff; --panel2:#f5f5f5; --line:#eaecef;
+    --txt:#0b0e11; --mut:#5e6673; --dim:#848e9c;
+    --grn:#0ecb81; --grnbg:rgba(14,203,129,.1);
+    --red:#f6465d; --redbg:rgba(246,70,93,.08);
+    --amb:#f0b90b; --ambbg:rgba(240,185,11,.16);
+    --blu:#f0b90b; --blubg:rgba(240,185,11,.18);
+    --hdr:#ffffff;
+    --sh:0 4px 14px rgba(11,14,17,.08);
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
   body{
     background:var(--bg);
-    background-image:radial-gradient(1000px 520px at 82% -12%, rgba(63,120,255,.10), transparent 60%),
-                     radial-gradient(700px 420px at -8% 108%, rgba(255,93,115,.06), transparent 60%);
-    background-attachment:fixed;
     color:var(--txt);
-    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font:14px/1.5 var(--font);
     -webkit-font-smoothing:antialiased;
   }
   ::-webkit-scrollbar{width:9px;height:9px}
-  ::-webkit-scrollbar-thumb{background:var(--line);border-radius:9px}
+  ::-webkit-scrollbar-thumb{background:#474d57;border-radius:9px}
   ::-webkit-scrollbar-track{background:transparent}
   button{font:inherit}
   input,select{font:inherit}
   .mono{font-variant-numeric:tabular-nums}
+  a{color:var(--blu)}
 
-  /* ---------- header ---------- */
+  /* ---------- header (Binance-style top bar) ---------- */
   header{
-    display:flex;align-items:center;gap:10px;padding:10px 18px;flex-wrap:wrap;
+    display:flex;align-items:center;gap:10px;padding:9px 18px;flex-wrap:wrap;
     position:sticky;top:0;z-index:40;
-    background:var(--hdr);backdrop-filter:blur(10px);
+    background:var(--hdr);
     border-bottom:1px solid var(--line);
   }
   .brand{display:flex;align-items:center;gap:10px;margin-right:4px}
-  .binance-mark{width:14px;height:14px;object-fit:contain;vertical-align:-3px;margin-right:3px}
-  .logo{width:34px;height:34px;border-radius:10px;flex:none;display:grid;place-items:center;font-size:17px;
-    background:linear-gradient(135deg,#ff5d73,#7d2330);color:#fff;box-shadow:0 0 18px rgba(255,93,115,.28)}
-  .brand h1{font-size:15.5px;letter-spacing:.1px}
-  .brand .sub{font-size:10.5px;color:var(--mut)}
+  .logo{width:30px;height:30px;border-radius:6px;flex:none;display:grid;place-items:center;font-size:15px;
+    background:var(--amb);color:#0b0e11;font-weight:900;box-shadow:0 0 0 1px rgba(240,185,11,.35)}
+  .brand h1{font-size:15px;letter-spacing:.1px;font-weight:800}
+  .brand .sub{font-size:10.5px;color:var(--mut);display:flex;align-items:center;gap:5px}
+  .binance-mark{width:14px;height:14px;object-fit:contain}
   .spacer{flex:1}
   .pill{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut)}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
   .dot.ok{background:var(--grn);box-shadow:0 0 9px var(--grn)}
   .dot.err{background:var(--red);box-shadow:0 0 9px var(--red)}
-  .badge{font-size:10.5px;font-weight:800;letter-spacing:.9px;padding:3px 9px;border-radius:99px;border:1px solid var(--line)}
+  .badge{font-size:10.5px;font-weight:800;letter-spacing:.9px;padding:3px 9px;border-radius:4px;border:1px solid var(--line)}
   .badge.sim{color:var(--grn);background:var(--grnbg)}
   .badge.live{color:var(--amb);background:var(--ambbg)}
-  .badge.auto{color:#0b1020;background:var(--amb)}
+  .badge.auto{color:#0b0e11;background:var(--amb);border-color:var(--amb)}
   .badge.man{color:var(--txt);background:var(--panel2)}
-  .badge.mon{color:var(--amb);background:var(--ambbg);border-color:var(--amb)}
+  .badge.mon{color:var(--amb);background:var(--ambbg);border-color:rgba(240,185,11,.4)}
 
-  .seg{display:inline-flex;border:1px solid var(--line);border-radius:11px;overflow:hidden;background:var(--panel2)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--panel2)}
   .seg button{border:none;background:transparent;color:var(--mut);padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
-  .seg button.on{color:#fff;background:var(--blu)}
+  .seg button.on{color:#0b0e11;background:var(--amb)}
   .seg button:disabled{opacity:.5;cursor:not-allowed}
 
-  .iconbtn{border:1px solid var(--line);background:var(--panel2);color:var(--txt);width:34px;height:34px;border-radius:10px;cursor:pointer;font-size:15px;flex:none}
-  .iconbtn:hover{border-color:var(--blu)}
-  .hbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:10px;padding:7px 12px;font-size:12.5px;font-weight:600;cursor:pointer;transition:.15s}
-  .hbtn:hover{border-color:var(--blu)}
-  .hbtn.primary{background:linear-gradient(135deg,#ff5d73,#9c2b3c);border:none;color:#fff}
-  .hbtn.primary:hover{filter:brightness(1.12)}
-  .hbtn.amber{background:var(--ambbg);color:var(--amb);border-color:rgba(245,181,68,.4)}
+  .iconbtn{border:1px solid var(--line);background:var(--panel2);color:var(--txt);width:34px;height:34px;border-radius:6px;cursor:pointer;font-size:15px;flex:none}
+  .iconbtn:hover{border-color:var(--amb);color:var(--amb)}
+  .hbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:6px;padding:7px 12px;font-size:12.5px;font-weight:600;cursor:pointer;transition:.15s}
+  .hbtn:hover{border-color:var(--amb);color:var(--amb)}
+  .hbtn.primary{background:var(--amb);border:none;color:#0b0e11;font-weight:800}
+  .hbtn.primary:hover{filter:brightness(1.1);color:#0b0e11}
+  .hbtn.amber{color:var(--amb);border-color:rgba(240,185,11,.4)}
   .hbtn.grn{color:var(--grn)}
   .hbtn.red{color:var(--red)}
 
@@ -99,54 +99,52 @@
   /* ---------- ticker strip ---------- */
   #ticker{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border-bottom:1px solid var(--line)}
   .tcell{background:var(--panel);padding:7px 18px;display:flex;align-items:center;gap:11px}
-  .coin{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;font-size:11px;font-weight:800;color:#0b1020;flex:none}
+  .coin{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;font-size:11px;font-weight:800;color:#0b0e11;flex:none}
   .tcell .nm{font-size:12.5px;font-weight:700}
   .tcell .pair{font-size:10px;color:var(--dim)}
   .tcell .pr{margin-left:auto;font-weight:700;font-size:15px}
   .tcell .ch{font-size:11px;font-weight:700}
   .up{color:var(--grn)} .down{color:var(--red)}
   .pos{color:var(--grn)} .neg{color:var(--red)} .warn{color:var(--amb)}
-  @keyframes flashUp{0%{color:#fff;text-shadow:0 0 10px rgba(34,211,159,.8)}100%{}}
-  @keyframes flashDown{0%{color:#fff;text-shadow:0 0 10px rgba(255,93,115,.8)}100%{}}
+  @keyframes flashUp{0%{color:#fff;text-shadow:0 0 10px rgba(14,203,129,.8)}100%{}}
+  @keyframes flashDown{0%{color:#fff;text-shadow:0 0 10px rgba(246,70,93,.8)}100%{}}
   .flash-up{animation:flashUp .8s ease-out 1}
   .flash-down{animation:flashDown .8s ease-out 1}
 
-  /* ---------- layout ---------- */
-  main{display:grid;grid-template-columns:minmax(320px,390px) 1fr;gap:14px;padding:14px 18px;align-items:start}
-  .leftcol{position:sticky;top:150px;max-height:calc(100vh - 170px)}
-  .rightcol{display:flex;flex-direction:column;gap:14px;min-width:0}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--rad);padding:10px;
-    box-shadow:var(--sh);transition:border-color .2s}
-  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:1.3px;color:var(--mut);
-    display:flex;align-items:center;gap:8px;margin-bottom:7px;font-weight:700}
+  /* ---------- layout: one wide column, console above pending proposals ---------- */
+  main{max-width:1500px;margin:0 auto;padding:14px 18px 30px}
+  .rightcol{display:flex;flex-direction:column;gap:12px;min-width:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--rad);padding:12px 14px;box-shadow:var(--sh)}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);
+    display:flex;align-items:center;gap:8px;margin-bottom:8px;font-weight:700}
   .card h2 .right{margin-left:auto;text-transform:none;letter-spacing:0;font-size:11px;font-weight:600;color:var(--dim)}
   .card h2 .hint{color:var(--dim);letter-spacing:0;text-transform:none}
   .card h2>*{min-width:0}
   .empty{color:var(--dim);font-size:12.5px;padding:4px 2px}
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line);
-    background:var(--panel2);color:var(--txt);border-radius:10px;padding:7px 13px;font-size:12.5px;font-weight:700;cursor:pointer;transition:.15s;white-space:nowrap}
-  .btn:hover{border-color:var(--blu)}
+    background:var(--panel2);color:var(--txt);border-radius:6px;padding:7px 13px;font-size:12.5px;font-weight:700;cursor:pointer;transition:.15s;white-space:nowrap}
+  .btn:hover{border-color:var(--amb);color:var(--amb)}
   .btn:disabled{opacity:.45;cursor:not-allowed}
-  .btn.primary{background:linear-gradient(135deg,#ff5d73,#9c2b3c);border:none;color:#fff}
-  .btn.primary:hover{filter:brightness(1.12)}
-  .btn.grn{color:var(--grn)} .btn.grn:hover{background:var(--grnbg);border-color:var(--grn)}
-  .btn.red{color:var(--red)} .btn.red:hover{background:var(--redbg);border-color:var(--red)}
-  .btn.amb{color:var(--amb)} .btn.amb:hover{background:var(--ambbg);border-color:var(--amb)}
-  .btn.blu{color:var(--blu)} .btn.blu:hover{background:var(--blubg);border-color:var(--blu)}
-  .btn.sm{padding:4px 10px;font-size:11.5px;border-radius:8px}
+  .btn.primary{background:var(--grn);border:none;color:#07130f}
+  .btn.primary:hover{filter:brightness(1.1);color:#07130f}
+  .btn.grn{color:var(--grn)} .btn.grn:hover{background:var(--grnbg);border-color:var(--grn);color:var(--grn)}
+  .btn.red{color:var(--red)} .btn.red:hover{background:var(--redbg);border-color:var(--red);color:var(--red)}
+  .btn.amb{color:var(--amb)} .btn.amb:hover{background:var(--ambbg);border-color:var(--amb);color:var(--amb)}
+  .btn.blu{color:var(--amb)} .btn.blu:hover{background:var(--ambbg);border-color:var(--amb);color:var(--amb)}
+  .btn.sm{padding:4px 10px;font-size:11.5px;border-radius:4px}
   input[type=number],input[type=text],select{
-    background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:9px;
-    padding:7px 9px;font-size:13px;outline:none;min-width:0
+    background:var(--bg2);border:1px solid var(--line);color:var(--txt);border-radius:4px;
+    padding:6px 8px;font-size:13px;outline:none;min-width:0
   }
-  input:focus,select:focus{border-color:var(--blu);box-shadow:0 0 0 2px rgba(77,159,255,.18)}
+  input:focus,select:focus{border-color:var(--amb)}
 
   /* ---------- toasts ---------- */
   #toasts{position:fixed;top:14px;right:14px;z-index:90;display:flex;flex-direction:column;gap:8px;max-width:340px}
-  .toast{border-radius:12px;padding:11px 14px;font-size:12.5px;background:var(--panel);border:1px solid var(--line);
+  .toast{border-radius:8px;padding:11px 14px;font-size:12.5px;background:var(--panel);border:1px solid var(--line);
     box-shadow:var(--sh);color:var(--txt);animation:toastIn .25s ease-out}
-  .toast.err{border-color:rgba(255,93,115,.55)}
-  .toast.warn{border-color:rgba(245,181,68,.55)}
-  .toast.ok{border-color:rgba(34,211,159,.55)}
+  .toast.err{border-color:rgba(246,70,93,.55)}
+  .toast.warn{border-color:rgba(240,185,11,.55)}
+  .toast.ok{border-color:rgba(14,203,129,.55)}
   .toast .t{font-weight:800;font-size:11px;letter-spacing:.5px;text-transform:uppercase;display:block;margin-bottom:2px}
   .toast.err .t{color:var(--red)} .toast.warn .t{color:var(--amb)} .toast.ok .t{color:var(--grn)}
   @keyframes toastIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
@@ -155,11 +153,11 @@
     padding:8px 18px;font-size:12.5px}
 
   /* ---------- console ---------- */
-  .chatcard{display:flex;flex-direction:column;height:430px;min-height:0;overflow:hidden}
-  .chatcard h2{margin-bottom:8px}
+  .chatcard{display:flex;flex-direction:column;min-height:0;overflow:hidden;height:clamp(240px,36vh,360px)}
+  .chatcard h2{margin-bottom:8px;flex:none}
   #chatbox{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;min-height:0;padding-right:2px}
-  .msg{max-width:96%;padding:9px 11px;border-radius:12px;font-size:12.5px;white-space:pre-wrap;word-wrap:break-word;line-height:1.5}
-  .msg.user{align-self:flex-end;background:var(--blubg);border:1px solid var(--line)}
+  .msg{max-width:96%;padding:9px 11px;border-radius:8px;font-size:12.5px;white-space:pre-wrap;word-wrap:break-word;line-height:1.5}
+  .msg.user{align-self:flex-end;background:var(--ambbg);border:1px solid var(--line)}
   .msg.agent{align-self:flex-start;background:var(--panel2);border:1px solid var(--line)}
   .msg.sys{align-self:stretch;background:transparent;border:1px dashed var(--line);color:var(--mut);font-size:11.5px}
   .msg.opt{background:var(--panel2);border:1px solid var(--line)}
@@ -167,10 +165,10 @@
   .optrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
   .optrow .coinchips{display:flex;gap:6px;flex-wrap:wrap}
   .coinchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--panel);
-    color:var(--txt);border-radius:99px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer}
-  .coinchip:hover{border-color:var(--blu);background:var(--blubg)}
+    color:var(--txt);border-radius:4px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer}
+  .coinchip:hover{border-color:var(--amb);color:var(--amb)}
   .chips{display:flex;gap:6px;flex-wrap:wrap;margin:9px 0}
-  .chip{font-size:11px;color:var(--blu);border:1px solid var(--line);background:var(--blubg);padding:4px 10px;
+  .chip{font-size:11px;color:var(--amb);border:1px solid var(--line);background:var(--ambbg);padding:4px 10px;
     border-radius:99px;cursor:pointer;font-weight:600}
   .chip:hover{filter:brightness(1.12)}
   .chatbar{display:flex;gap:8px}
@@ -179,40 +177,40 @@
 
   /* ---------- stats ---------- */
   .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-  .tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
-  .tile .lbl{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px;font-weight:700}
-  .tile .val{font-size:17px;font-weight:800;margin-top:1px;font-variant-numeric:tabular-nums}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:7px 10px}
+  .tile .lbl{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;font-weight:700}
+  .tile .val{font-size:18px;font-weight:800;margin-top:1px;font-variant-numeric:tabular-nums}
   .tile .sub{font-size:10.5px;color:var(--dim);margin-top:2px;font-variant-numeric:tabular-nums}
-  .chip-badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:800;letter-spacing:.4px;white-space:nowrap}
+  .chip-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:.4px;white-space:nowrap}
   .chip-badge.long,.chip-badge.OK{background:var(--grnbg);color:var(--grn)}
   .chip-badge.short,.chip-badge.DANGER{background:var(--redbg);color:var(--red)}
   .chip-badge.WATCH{background:var(--ambbg);color:var(--amb)}
-  .chip-badge.OPEN,.chip-badge.TRANSFER{background:var(--blubg);color:var(--blu)}
+  .chip-badge.OPEN,.chip-badge.TRANSFER{background:var(--ambbg);color:var(--amb)}
   .chip-badge.CLOSE,.chip-badge.TRADE,.chip-badge.REDUCE{background:var(--redbg);color:var(--red)}
   .chip-badge.auto{background:var(--ambbg);color:var(--amb)}
 
   /* ---------- trade panel ---------- */
-  .tradeselect{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px}
+  #tradeCard .tradeselect{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px}
   .tradeselect select{min-width:150px;font-weight:700}
   .trade-quote{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:7px 10px;border:1px solid var(--line);
-    border-radius:10px;background:var(--bg2);margin-bottom:7px}
+    border-radius:6px;background:var(--bg2);margin-bottom:7px}
   .tq-coin{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:800}
   .tq-price{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.3px}
   .tq-chg{font-size:13px;font-weight:800}
   .tq-tag{color:var(--dim);font-size:10.5px;margin-top:2px}
   .duo{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .sidepane{border:1px solid var(--line);border-radius:10px;padding:7px 9px}
+  .sidepane{border:1px solid var(--line);border-radius:6px;padding:7px 9px}
   .sidepane,.sidepane>*{min-width:0}
-  .sidepane.sh{padding-right:14px;background:linear-gradient(270deg,rgba(255,93,115,.06),transparent 60%)}
-  .sidepane.ln{background:linear-gradient(90deg,rgba(34,211,159,.06),transparent 60%)}
-  .sidepane .head{display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:800;letter-spacing:.6px;margin-bottom:5px}
+  .sidepane.sh{border-color:rgba(246,70,93,.5);background:linear-gradient(270deg,rgba(246,70,93,.08),transparent 60%)}
+  .sidepane.ln{border-color:rgba(14,203,129,.5);background:linear-gradient(90deg,rgba(14,203,129,.08),transparent 60%)}
+  .sidepane .head{display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:800;letter-spacing:.4px;margin-bottom:5px}
   .sidepane.sh .head{color:var(--red)} .sidepane.ln .head{color:var(--grn)}
   .frow{display:flex;align-items:center;gap:6px;margin-bottom:5px}
   .sidepane input{padding:4px 6px;font-size:12px}
   .frow label{font-size:11px;color:var(--mut);width:58px;flex:none;font-weight:700}
   .frow input{flex:1;min-width:0;text-align:right;font-variant-numeric:tabular-nums}
   .frow .u{color:var(--dim);font-size:11px;flex:none;width:18px}
-  .openbtn{width:100%;padding:6px;border-radius:8px;font-weight:800;letter-spacing:.4px;cursor:pointer;border:1px solid transparent;transition:.15s}
+  .openbtn{width:100%;padding:6px;border-radius:4px;font-weight:800;letter-spacing:.4px;cursor:pointer;border:1px solid transparent;transition:.15s}
   .openbtn.sh{background:var(--red);color:#fff}.openbtn.sh:hover{filter:brightness(1.1)}
   .openbtn.ln{background:var(--grn);color:#07130f}.openbtn.ln:hover{filter:brightness(1.08)}
   .est{font-size:10.5px;color:var(--dim);margin-top:8px;font-variant-numeric:tabular-nums}
@@ -230,33 +228,32 @@
   .tpslrow{display:flex;align-items:center;gap:4px}
   .tpslrow .lbl{font-size:9px;font-weight:800}
   .tpslrow .lbl.tp{color:var(--grn)} .tpslrow .lbl.sl{color:var(--red)}
-  .tpslrow input{width:76px;padding:4px 6px;font-size:11.5px;border-radius:7px;font-variant-numeric:tabular-nums;text-align:right}
+  .tpslrow input{width:76px;padding:4px 6px;font-size:11.5px;border-radius:4px;font-variant-numeric:tabular-nums;text-align:right}
   .closebtn{border:none;background:transparent;color:var(--dim);cursor:pointer;font-size:16px;line-height:1}
   .closebtn:hover{color:var(--red)}
-  .relbtn{border:1px solid var(--line);background:transparent;color:var(--grn);cursor:pointer;font-size:13px;line-height:1;border-radius:6px;padding:3px 6px;margin-right:4px}
-  .relbtn:hover{background:rgba(80,220,120,.12);border-color:var(--grn)}
-  .walletbar{display:block;margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:9px;background:var(--panel2);font-size:12px}
-  .walletbar .wamt{font-weight:800;font-variant-numeric:tabular-nums}
+  .relbtn{border:1px solid var(--line);background:transparent;color:var(--grn);cursor:pointer;font-size:13px;line-height:1;border-radius:4px;padding:3px 6px;margin-right:4px}
+  .relbtn:hover{background:rgba(14,203,129,.12);border-color:var(--grn)}
+  .walletbar{display:block;margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:6px;background:var(--bg2);font-size:12px}
+  .walletbar .wamt{font-weight:800;font-variant-numeric:tabular-nums;color:var(--grn)}
   .walletbar .wnote{color:var(--dim);font-size:10.5px;margin-bottom:6px}
   .walletbar .wfrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:3px 0}
-  .walletbar .wfrow label{min-width:150px}
-  .walletbar .wfrow input{width:110px;padding:4px 6px;font-size:12px;border-radius:7px;font-variant-numeric:tabular-nums;text-align:right}
+  .walletbar .wfrow label{min-width:150px;color:var(--mut)}
+  .walletbar .wfrow input{width:110px;padding:4px 6px;font-size:12px;border-radius:4px;font-variant-numeric:tabular-nums;text-align:right}
 
   /* ---------- proposals ---------- */
-  .prop{border:1px solid var(--line);border-radius:9px;padding:6px 8px;margin-bottom:5px;background:var(--panel2)}
+  .prop{border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:5px;background:var(--panel2)}
   .prop:last-child{margin-bottom:0}
   .prop .r1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .prop .r2{font-size:12px;color:var(--mut);margin-top:3px}
   .prop .acts{display:flex;gap:5px;margin-top:5px}
 
   /* ---------- guardrails ---------- */
-  .rails-edit{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
-  .re{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--panel2);
-    border:1px solid var(--line);border-radius:8px;padding:5px 7px}
+  .rails-edit{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px}
+  .re{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg2);
+    border:1px solid var(--line);border-radius:6px;padding:5px 8px}
   .re .lbl{font-size:12px;color:var(--mut)}
   .re .hint{font-size:9.5px;color:var(--dim);display:block}
-  .re .iv{display:flex;align-items:center;gap:4px}
-  .re .iv{min-width:0}
+  .re .iv{display:flex;align-items:center;gap:4px;min-width:0}
   .re input{width:86px;text-align:right;padding:4px 6px;font-size:12.5px;font-variant-numeric:tabular-nums}
   .re .u{font-size:10.5px;color:var(--dim)}
   .re.saved input{border-color:var(--grn)}
@@ -268,7 +265,7 @@
   .cond-item{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;padding:4px 2px;
     border-bottom:1px solid var(--line);gap:8px}
   .cond-item:last-child{border-bottom:none}
-  .audit{max-height:42px;overflow-y:auto;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .audit{max-height:120px;overflow-y:auto;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
   .audit div{padding:2px 0;border-bottom:1px dashed var(--line);color:var(--mut);white-space:normal;overflow-wrap:anywhere}
   .audit div:last-child{border-bottom:none}
   .audit b{color:var(--txt);font-weight:600}
@@ -279,69 +276,39 @@
   /* ---------- modals ---------- */
   .modal{position:fixed;inset:0;z-index:80;display:none;align-items:center;justify-content:center;padding:18px}
   .modal.open{display:flex}
-  .backdrop{position:absolute;inset:0;background:rgba(5,8,18,.66);backdrop-filter:blur(3px)}
-  .mcard{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--sh);
+  .backdrop{position:absolute;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(3px)}
+  .mcard{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--sh);
     padding:22px;max-width:520px;width:100%;max-height:86vh;overflow-y:auto}
   .mcard h3{font-size:16px;margin-bottom:12px;display:flex;gap:8px;align-items:center}
   .mcard p{font-size:13px;color:var(--mut);margin-bottom:10px;line-height:1.55}
-  .mcard .warnbox{border:1px solid rgba(245,181,68,.5);background:var(--ambbg);border-radius:12px;padding:12px 14px;
+  .mcard .warnbox{border:1px solid rgba(240,185,11,.5);background:var(--ambbg);border-radius:8px;padding:12px 14px;
     font-size:12.5px;margin:12px 0}
   .mcard .acts{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}
 
   /* ---------- onboarding tour ---------- */
   #tourLay{position:fixed;inset:0;z-index:100;display:none;pointer-events:none}
   #tourLay.open{display:block}
-  #tourShade{position:absolute;inset:0;background:rgba(4,7,16,.55);pointer-events:none}
-  #tourRing{position:absolute;border:2px solid var(--blu);border-radius:14px;box-shadow:0 0 0 5px rgba(77,159,255,.22),
-    0 0 0 9999px rgba(4,7,16,.5);transition:all .25s}
+  #tourShade{position:absolute;inset:0;background:rgba(2,4,8,.6);pointer-events:none}
+  #tourRing{position:absolute;border:2px solid var(--amb);border-radius:10px;box-shadow:0 0 0 5px rgba(240,185,11,.22),
+    0 0 0 9999px rgba(2,4,8,.55);transition:all .25s}
   #tourCard{position:fixed;pointer-events:auto;z-index:102;width:min(380px,calc(100vw - 36px));
-    background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--sh);padding:16px 18px}
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--sh);padding:16px 18px}
   #tourCard h3{font-size:14px;margin-bottom:6px;display:flex;align-items:center;gap:8px}
   #tourCard p{font-size:12.5px;color:var(--mut);line-height:1.5}
   #tourStep{display:block;font-size:10.5px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-top:10px}
   #tourDots{display:flex;gap:5px;margin-top:8px}
   #tourDots i{width:7px;height:7px;border-radius:50%;background:var(--line);display:block}
-  #tourDots i.on{background:var(--blu)}
+  #tourDots i.on{background:var(--amb)}
   .tacts{display:flex;gap:7px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap}
 
-  @media (max-width:1120px){
-    main{grid-template-columns:1fr}
-    .leftcol{position:static;max-height:none}
-    .chatcard{height:min(56vh,560px)}
-  }
-  @media (min-width:1121px){
-    body{zoom:.65}
-    html,body{overflow-x:hidden;overflow-y:visible}
-    main{--console-width:clamp(352px,30vw,429px);grid-template-columns:var(--console-width) minmax(0,1fr);height:calc(100dvh - var(--chrome-height));min-height:0;padding:14px 18px}
-    .rightcol{display:grid;grid-template-columns:1fr 1fr;align-content:start;align-items:start;gap:10px;height:100%;overflow-y:auto;padding-right:4px}
-    .leftcol{height:auto;max-height:none}
-    .leftcol .chatcard{height:430px}
-    .rightcol > .stats{grid-column:1 / -1}
-    .rightcol > .card:nth-child(3),.rightcol > .card:nth-child(4){grid-column:1 / -1}
-    .rightcol > .card:nth-child(5){grid-column:1 / -1}
-    .rightcol > .stats{order:1}
-    .rightcol > #tradeCard{order:2}
-    .rightcol > .card:nth-child(6){order:3}
-    .rightcol > .card:nth-child(3){order:4}
-    .rightcol > .card:nth-child(4){order:5}
-    .rightcol > .card:nth-child(5){order:6}
-    .rightcol > .card:nth-child(7){order:7}
-    .rightcol > .card{min-width:0}
-    .chatcard{height:430px}
-    .rightcol > .card:nth-child(5) .rails-edit{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
-    .rightcol > .card:nth-child(5) .re{padding:4px 6px}
-    .rightcol > .card:nth-child(5) .re .hint{display:inline;white-space:nowrap;margin-left:3px}
-    .rightcol > .card:nth-child(5) .gr-note{margin-top:5px}
-    #tradeCard{padding:7px}
-    #tradeCard h2{margin-bottom:4px}
-    #tradeCard .tradeselect{margin-bottom:4px}
-    #tradeCard .trade-quote{flex-wrap:nowrap;padding:3px 8px;min-height:40px}
-    #tradeCard .sidepane{display:grid;grid-template-columns:1fr 1fr;align-items:center;column-gap:5px;padding:2px 5px}
-    #tradeCard .sidepane .head,#tradeCard .sidepane .openbtn,#tradeCard .sidepane .est{grid-column:1 / -1}
-    #tradeCard .sidepane .frow{margin-bottom:0}
-    #tradeCard .sidepane input{padding:1px 4px}
-    #tradeCard .sidepane .openbtn{padding:3px}
-    #tradeCard .sidepane .est{margin-top:1px}
+  @media (min-width:1180px){
+    /* stats → trade → positions → console → pending proposals flow full-width,
+       in that order; the tighter panels (guardrails / conditions / audit) fill
+       the two-column area below. DOM order stays: 1 stats, 2 trade, 3 positions,
+       4 console, 5 proposals, 6 guardrails, 7 conditions, 8 audit. */
+    .rightcol{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:12px}
+    .rightcol > :nth-child(1),.rightcol > :nth-child(2),.rightcol > :nth-child(3),
+    .rightcol > :nth-child(4),.rightcol > :nth-child(5){grid-column:1 / -1}
   }
   @media (max-width:760px){
     #ticker{grid-template-columns:repeat(2,1fr)}
@@ -350,6 +317,7 @@
     main{padding:10px}
   }
 </style>
+
 </head>
 <body>
 
@@ -386,25 +354,7 @@
 <div id="ticker"></div>
 
 <main>
-  <!-- ============ LEFT: CONSOLE ============ -->
-  <section class="leftcol">
-    <div class="card chatcard">
-      <h2>Guardian console</h2>
-      <div id="chatbox"></div>
-      <div class="chips">
-        <span class="chip" onclick="send('market analysis')">📈 analyze a coin</span>
-        <span class="chip" onclick="send('risk report')">📋 risk report</span>
-        <span class="chip" onclick="send('protect my positions')">🚨 protect now</span>
-        <span class="chip" onclick="send('status')">📊 status</span>
-      </div>
-      <div class="chatbar">
-        <input id="input" placeholder="Talk to the guardian — try “analyze BTC”…" autocomplete="off">
-        <button class="btn primary" id="btnSend">Send</button>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ RIGHT: DASHBOARD ============ -->
+  <!-- ============ DASHBOARD (single wide column) ============ -->
   <section class="rightcol">
 
     <div class="stats">
@@ -421,7 +371,7 @@
       <div class="tradeselect">
         <label style="font-size:12px;color:var(--mut);font-weight:700">Coin</label>
         <select id="selCoin"></select>
-        <span style="font-size:11px;color:var(--dim)">margin is taken from spot cash · cap <b id="maxLevNote">50x</b></span>
+        <span style="font-size:11px;color:var(--dim)">margin is taken from spot cash · leverage is set per order</span>
       </div>
       <div class="trade-quote">
         <div class="tq-coin"><span class="coin" id="selGlyph" style="background:#f7931a">₿</span><span id="selName">BTC/USDT</span></div>
@@ -460,6 +410,22 @@
         </table>
       </div>
       <div class="walletbar" id="walletBar" style="display:none"></div>
+    </div>
+
+    <!-- Guardian console (directly above pending proposals) -->
+    <div class="card chatcard">
+      <h2>Guardian console</h2>
+      <div id="chatbox"></div>
+      <div class="chips">
+        <span class="chip" onclick="send('market analysis')">📈 analyze a coin</span>
+        <span class="chip" onclick="send('risk report')">📋 risk report</span>
+        <span class="chip" onclick="send('protect my positions')">🚨 protect now</span>
+        <span class="chip" onclick="send('status')">📊 status</span>
+      </div>
+      <div class="chatbar">
+        <input id="input" placeholder="Ask anything or give a command — “open long BTC 500 at 10x”, “what is liquidation risk?”…" autocomplete="off">
+        <button class="btn primary" id="btnSend">Send</button>
+      </div>
     </div>
 
     <!-- Pending proposals -->
@@ -684,7 +650,6 @@ function renderTradeSel(){
   $("selGlyph").style.background=c.bg; $("selGlyph").textContent=c.g;
   $("selName").textContent=c.base+"/USDT";
   $("btnAnalyzeSym").textContent=c.base;
-  if(S){ $("maxLevNote").textContent=(S.guardrails.max_leverage||50)+"x"; }
   const liqInfo=liqFor(selCoin);
   if(liqInfo) $("selLiq").textContent=liqInfo;
   else $("selLiq").textContent="";
@@ -702,8 +667,6 @@ async function openTrade(side){
   const lev=parseFloat($("mb"+sfx+"lev").value)||10;
   const mar=parseFloat($("mb"+sfx+"mar").value);
   if(!mar||mar<=0){ toast("Missing margin","Enter how much USDT margin to open "+side+" "+selCoin+" with.","warn"); return; }
-  const cap=S&&S.guardrails?S.guardrails.max_leverage:50;
-  if(lev>cap){ toast("Guardrail","Leverage "+lev+"x is above the "+cap+"x cap you set.","warn"); return; }
   try{
     const r=await api("/api/trade/open",{method:"POST",body:JSON.stringify({symbol:selCoin,side,margin_usdt:mar,leverage:lev})});
     if(r.state) S=r.state;
@@ -808,22 +771,10 @@ function renderPositions(){
   const fps=(S.account&&S.account.futures_positions)||[];
   const danger=fps.filter(p=>p.risk==="DANGER").length;
   $("posNote").textContent=fps.length+" open"+(danger?" · "+danger+" danger":" · all clear");
-  // free futures-wallet balance -> spot control (idle money only; never part
-  // of an open position's margin, so returning it can't weaken protection)
-  const cash=S.account.cash_usdt||0, wfree=S.account.futures_wallet_usdt||0, wb=$("walletBar");
-  if(wb){
-    wb.style.display="block";
-    wb.innerHTML=
-      '<div class="wnote" style="flex-basis:100%">Money is never trapped: move free balance between <b>spot</b> and the <b>futures wallet</b> either way. Only free balance moves — no open position\'s margin is touched, so liquidation protection is unchanged.</div>'
-      +'<div class="wfrow"><label>From <b>spot cash</b> <span class="wamt">'+fmtP(cash)+'</span></label>'
-      +'<input id="amtFromSpot" type="number" min="0" step="10" placeholder="amount">'
-      +'<button class="btn sm blu" onclick="fillAmt(\'amtFromSpot\','+cash+')">max</button>'
-      +'<button class="btn sm grn" onclick="fundMove(\'to_futures\',\'amtFromSpot\')">→ Futures wallet</button></div>'
-      +'<div class="wfrow"><label>From <b>futures wallet</b> <span class="wamt">'+fmtP(wfree)+'</span></label>'
-      +'<input id="amtFromWallet" type="number" min="0" step="10" placeholder="amount">'
-      +'<button class="btn sm blu" onclick="fillAmt(\'amtFromWallet\','+wfree+')">max</button>'
-      +'<button class="btn sm grn" onclick="fundMove(\'to_spot\',\'amtFromWallet\')">↩ Spot cash</button></div>';
-  }
+  // Two-way funds control (spot <-> futures wallet). Built once so the amount
+  // inputs keep what you typed — the periodic state refresh never wipes them;
+  // only the live balance figures update in place below.
+  renderWalletBar();
   const key=posKey(fps);
   if(!fps.length){
     if(lastPosKey!==""){
@@ -920,14 +871,43 @@ async function releaseMargin(symbol){
     await refreshState();
   }catch(e){ errToast(e.message); }
 }
-function fillAmt(id,maxVal){
-  const el=document.getElementById(id); if(el) el.value=Math.round(maxVal*100)/100;
+function renderWalletBar(){
+  const wb=$("walletBar"); if(!wb) return;
+  const cash=(S&&S.account)?(S.account.cash_usdt||0):0;
+  const wfree=(S&&S.account)?(S.account.futures_wallet_usdt||0):0;
+  if(!wb.dataset.built){
+    wb.style.display="block";
+    wb.dataset.built="1";
+    wb.innerHTML=
+      '<div class="wnote" style="flex-basis:100%">Money is never trapped: move free balance between <b>spot</b> and the <b>futures wallet</b> either way. Only free balance moves — no open position\'s margin is touched, so liquidation protection is unchanged.</div>'
+      +'<div class="wfrow"><label>From <b>spot cash</b> <span class="wamt" id="wbalSpot"></span></label>'
+      +'<input id="amtFromSpot" type="number" min="0" step="1" placeholder="amount">'
+      +'<button class="btn sm blu" id="btnMaxSpot" title="Fill the whole spot cash balance">max</button>'
+      +'<button class="btn sm grn" id="btnToFutures">→ Futures wallet</button></div>'
+      +'<div class="wfrow"><label>From <b>futures wallet</b> <span class="wamt" id="wbalFut"></span></label>'
+      +'<input id="amtFromWallet" type="number" min="0" step="1" placeholder="amount">'
+      +'<button class="btn sm blu" id="btnMaxWallet" title="Fill the whole free futures balance">max</button>'
+      +'<button class="btn sm grn" id="btnToSpot">↩ Spot cash</button></div>';
+    $("btnMaxSpot").addEventListener("click",()=>fillAmt("amtFromSpot"));
+    $("btnMaxWallet").addEventListener("click",()=>fillAmt("amtFromWallet"));
+    $("btnToFutures").addEventListener("click",()=>fundMove("to_futures","amtFromSpot"));
+    $("btnToSpot").addEventListener("click",()=>fundMove("to_spot","amtFromWallet"));
+  }
+  // live balance figures update in place; never re-render the inputs
+  const spot=$("wbalSpot"), fut=$("wbalFut");
+  if(spot) spot.textContent=fmtP(cash);
+  if(fut) fut.textContent=fmtP(wfree);
+}
+function fillAmt(id){
+  const el=document.getElementById(id); if(!el) return;
+  const key=id==="amtFromSpot"?"cash_usdt":"futures_wallet_usdt";
+  const v=(S&&S.account)?(S.account[key]||0):0;
+  el.value=Math.round(v*100)/100;
 }
 async function fundMove(direction,inputId){
   const el=document.getElementById(inputId); if(!el) return;
   const typed=parseFloat(el.value);
   const amt=(!isNaN(typed)&&typed>0)?typed:null;   // blank/0 = move the whole source balance
-  if(amt===null) el.value="max";
   const label=direction==="to_futures"?"into the futures wallet":"back to spot cash";
   if(amt===null&&!confirm("Move the whole available balance "+label+"?")) return;
   try{
@@ -985,8 +965,6 @@ const RAIL_KEYS=[
   ["liq_danger_pct","Danger zone","< this = DANGER","%",1],
   ["liq_warn_pct","Watch zone","< this = WATCH","%",1],
   ["liq_target_dist_pct","De-risk target","headroom after action","%",1],
-  ["min_trade_value_usdt","Min action value","ignore dust orders","$",0],
-  ["max_leverage","Leverage cap","max when opening","x",0],
 ];
 function pctToInput(v){ return +(Math.round(v*1000)/10).toFixed(1); }
 function inputToRail(k,v){ return k.endsWith("_pct")? (v/100) : v; }
@@ -1188,12 +1166,13 @@ const TOUR=[
   {sel:"#btnHelp",title:"Welcome to Liquidation Guardian",txt:"Your futures risk-protection agent for Binance. I watch your open positions, compute live liquidation prices, and act — with your approval by default. This tour walks through every feature (90 seconds)."},
   {sel:"#ticker",title:"Live prices",txt:"BTC, ETH, BNB and SOL stream here in real time, with 24h change. Prices flash green/red the instant they move. This is the same feed used to mark your positions."},
   {sel:"#seg",title:"Agent mode",txt:"Manual (default): I propose every action and wait for your approval. Automatic: I act on your behalf after you accept a clear risk notice. You can switch at any time."},
-  {sel:"#tradeCard",title:"Trade panel",txt:"Pick a coin from the dropdown. Price sits above the coin name. Long and Short sit side by side — set leverage (blank = 10x, capped by your guardrail) and the USDT margin, then Open. Every order waits for approval unless you're in Auto mode."},
-  {sel:"#positions",title:"Positions + money flows",txt:"Each open position shows entry, mark, liquidation price, distance and PnL. Two exits of money: ↩ releases excess margin (keeps the position at its de-risk headroom) and ✕ closes it. When money sits idle in the futures wallet, a bar below the table moves it back to spot — funds are never trapped."},
-  {sel:"#railsRoot",title:"Guardrails",txt:"Edit the risk thresholds live: danger zone, watch zone, de-risk target, leverage cap and min action value. Every knob here genuinely gates what the guardian does — nothing is decorative."},
-  {sel:"#proposals",title:"Pending proposals",txt:"In manual mode all actions land here first: de-risks, opens, closes, fund moves, condition triggers. Read the reasoning and Approve or Reject each one — nothing executes without you."},
-  {sel:"#btnMore",title:"More tools",txt:"Optional tools live here: market analysis, price conditions, and the audit trail. The main screen stays focused on liquidation protection."},
-  {sel:"#input",title:"Talk to it",txt:"Plain language works: “risk report”, “protect my positions”, “market analysis”, “status”, or “if BTC drops below 60,000, add 400 margin”. Have fun — and trade carefully."},
+  {sel:"#tradeCard",title:"Trade panel",txt:"Pick a coin from the dropdown. Price sits above the coin name. Long and Short sit side by side — set the leverage (10x if blank) and the USDT margin, then Open. Every order waits for approval unless you're in Auto mode."},
+  {sel:"#positions",title:"Positions + money flows",txt:"Each open position shows entry, mark, liquidation price, distance and PnL. ↩ releases excess margin (keeping the position at its de-risk headroom) and ✕ closes it. The bar below the table moves free balance between spot and the futures wallet — both ways — so funds are never trapped."},
+  {sel:"#chatcard",title:"Guardian console",txt:"Right above Pending Proposals so you can act fast. Type commands (“open long BTC 500 at 10x”, “add 200 margin to BTC”, “move 500 to futures”) or just ask questions. With an OpenAI-compatible key configured it's an open-ended agent; without one it still understands the full command set."},
+  {sel:"#proposals",title:"Pending proposals",txt:"Everything the agent wants to do lands here: de-risks, opens, closes, fund moves, condition triggers. Read the reasoning, then Approve or Reject — nothing executes without you in manual mode."},
+  {sel:"#railsRoot",title:"Guardrails",txt:"Edit the three risk thresholds that actually matter: danger zone, watch zone and de-risk target. No decorative knobs remain."},
+  {sel:"#btnMore",title:"More tools",txt:"Optional tools live in the panels below: price conditions and the audit trail."},
+  {sel:"#input",title:"Talk to it",txt:"Plain language works: “risk report”, “protect my positions”, “status”, “open long BTC 500 at 10x”, “close all my positions” or “if BTC drops below 60,000, add 400 margin”. Have fun — and trade carefully."},
 ];
 let tourIdx=-1;
 function tourDone(){
