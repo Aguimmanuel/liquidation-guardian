@@ -172,12 +172,14 @@ flows through the guardrailed propose/approve pipeline, exactly as its button
 does (`/api/trade/*`, `/api/return`, `/api/funds/transfer`, `/api/tpsl`,
 `/api/guardrails`).
 
-Price conditions are edge-triggered: a condition fires *once* when price first
-crosses the trigger, then re-arms only after price returns through it — so a
-coin that simply stays past the trigger can never re-propose or re-execute on
-every monitor poll (no approval-queue spam, no auto-mode cash drain). A BUY
-("add margin") condition becomes a real margin transfer to the open position
-(it never sells the position); a SELL condition reduces it.
+Price conditions are one-shot and auto-close: a condition fires *once* when
+price first crosses the trigger, queues/executes its single action, and is
+then removed from state entirely — it disappears from the page and can never
+re-propose, re-execute, or re-arm, so a coin that stays past the trigger can
+never spam the approval queue or drain cash in auto mode on every monitor
+poll. The audit trail keeps the fired record. A BUY ("add margin") condition
+becomes a real margin transfer to the open position (it never sells the
+position); a SELL condition reduces it.
 
 ## Security model
 
@@ -199,6 +201,6 @@ always-on monitor (manual escalation queue, autonomous auto de-risk, retry
 throttling), the funds round trip in both directions (spot ↔ futures wallet by
 amount, bounded per-position margin release), console-driven open → add-margin
 → transfer → close lifecycles, the fixed add-margin condition semantics, the
-edge-triggered conditions (one fire per crossing, re-arm on return), and the
-deliberate absence of any per-day budget / order-size cap / cooldown / dust
-floor / leverage cap.
+one-shot price conditions (fire once, then closed and removed from state and
+page), and the deliberate absence of any per-day budget / order-size cap /
+cooldown / dust floor / leverage cap.

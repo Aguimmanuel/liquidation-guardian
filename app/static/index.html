@@ -696,7 +696,28 @@ async function openTrade(side){
     if(r.state) S=r.state;
     addMsg(r.message,"agent");
     await refreshState();
+    // Once the open is accepted (queued for approval, or executed right away
+    // in automatic mode) the ticket is spent — clear the entered figure so it
+    // doesn't linger and can't be double-clicked into a second order.
+    if(actionAccepted(r)) clearOpenForm(side);
   }catch(e){ errToast(e.message); }
+}
+/* True when a backend action was accepted: a proposal is queued for approval,
+   or it auto-executed (automatic-mode replies are prefixed with ⚡). Blocked
+   and failed replies never carry either marker, so the form keeps the user's
+   figures for them to fix. */
+function actionAccepted(r){
+  if(!r) return false;
+  if(r.proposals&&r.proposals.length>0) return true;
+  const m=r.message||"";
+  return m.trim().charAt(0)==="⚡";
+}
+function clearOpenForm(side){
+  const sfx=side==="LONG"?"L":"S";
+  const mar=$("mb"+sfx+"mar"), lev=$("mb"+sfx+"lev");
+  if(mar) mar.value="";
+  if(lev) lev.value="";
+  recomputeEsts();
 }
 $("btnShort").addEventListener("click",()=>openTrade("SHORT"));
 $("btnLong").addEventListener("click",()=>openTrade("LONG"));
@@ -939,6 +960,10 @@ async function fundMove(direction,inputId){
     if(r.proposals&&r.proposals.length) addMsg(r.message,"agent");
     else if(r.message) addMsg(r.message,"agent");
     await refreshState();
+    // A transfer that was accepted (queued for approval, or executed in
+    // automatic mode) consumes the typed amount — clear it so the box shows
+    // a fresh ticket instead of a stale figure.
+    if(actionAccepted(r)) el.value="";
   }catch(e){ errToast(e.message); }
 }
 
@@ -1056,16 +1081,16 @@ function refreshGuardrailReadouts(){
 /* ---------------- conditions ---------------- */
 function renderConditions(){
   const box=$("conditions");
-  if(!S.conditions.length){ box.innerHTML='<div class="empty">No conditions armed. Example: “if BTC drops below 60,000, add 400 margin”.</div>'; return; }
-  box.innerHTML=S.conditions.map(c=>{
-    const state = (!c.active && c.fires>0)
-      ? '<span class="chip-badge" style="background:var(--grnbg);color:var(--grn)">fired · closed</span>'
-      : (c.active
-          ? '<span class="chip-badge" style="background:var(--blubg);color:var(--blu)">armed</span>'
-          : '<span class="chip-badge" style="background:var(--ambbg);color:var(--amb)">off</span>');
+  // Only armed conditions are shown. A condition that fired is closed and
+  // removed server-side on its single shot, so it must never linger here —
+  // this filter also hides any stale non-active row from a snapshot.
+  const armed=(S.conditions||[]).filter(c=>c.active);
+  if(!armed.length){ box.innerHTML='<div class="empty">No conditions armed. Example: “if BTC drops below 60,000, add 400 margin”.</div>'; return; }
+  box.innerHTML=armed.map(c=>{
     return `<div class="cond-item"><span><b>${esc(c.symbol)}</b> ${c.op==="ABOVE"?"goes above":"drops below"} ${fmtP(c.price)}
-      → ${c.side==="BUY"?"add margin":"reduce"} ${fmtP(c.amount_usdt)} <span style="color:var(--dim)">· fired ${c.fires}×</span></span>
-      ${state}<button class="btn sm red" onclick="removeCond('${c.id}')">✕</button></div>`;}).join("");
+      → ${c.side==="BUY"?"add margin":"reduce"} ${fmtP(c.amount_usdt)}</span>
+      <span class="chip-badge" style="background:var(--blubg);color:var(--blu)">armed</span>
+      <button class="btn sm red" onclick="removeCond('${c.id}')">✕</button></div>`;}).join("");
 }
 async function removeCond(id){ try{ await api("/api/conditions/"+id,{method:"DELETE"}); await refreshState(); }catch(e){ errToast(e.message); } }
 $("btnCond").addEventListener("click",async()=>{
@@ -1084,7 +1109,7 @@ $("btnCond").addEventListener("click",async()=>{
 const SPOKEN={
   executed:"✅ executed", proposal_rejected:"🚫 rejected",
   tp_sl_fired:"🎯 tp/sl fired", tp_sl_execution_error:"❌ tp/sl error", execution_error:"❌ execution error",
-  condition_fired:"🚨 condition fired", condition_blocked:"⛔ condition blocked",
+  condition_fired:"🚨 condition fired", condition_closed:"🗑️ condition closed", condition_deferred:"⏸️ condition deferred", condition_blocked:"⛔ condition blocked",
   de_risk_proposed:"🛡️ de-risk proposed", de_risk_blocked:"⛔ de-risk blocked",
   auto_de_risk_engaged:"🛡️ auto de-risk engaged", auto_de_risk:"🛡️ auto de-risk",
   monitor_zone:"🛰️ monitoring", de_risk_alert:"🚨 danger — plan queued",

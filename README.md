@@ -61,11 +61,12 @@ positions from liquidation risk.
   becomes an open-ended agent: the model reads your live portfolio context,
   answers questions in plain English, and still routes every action through
   the same guardrailed propose-and-approve pipeline.
-- **Price conditions are one-shot.** Arm “if BTC drops below 60,000, add 400
-  margin” and it triggers exactly once when price crosses past the trigger,
-  then closes itself (armed → *fired · closed*) — it never loops, never
+- **Price conditions are one-shot and auto-close.** Arm “if BTC drops below
+  60,000, add 400 margin” and it triggers exactly once when price crosses past
+  the trigger, then closes and removes itself — the row disappears from the
+  page (the audit trail keeps the fired record). It never loops, never
   re-arms, and a coin that stays past the price can't spam the approval queue
-  or drain cash in auto mode. Create a fresh condition for another shot.
+  or drain cash in auto mode. Arm a fresh condition for another shot.
 
 This scope is deliberate. The project is not trying to be a broad autonomous
 trading system; it is an AI risk agent for futures protection and staged

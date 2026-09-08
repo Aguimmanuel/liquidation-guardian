@@ -69,13 +69,14 @@ Works against this build as of Phase 3 (`tests/` = 100+ passing).
    wiggle fires it, e.g. `BTCUSDT`, **ABOVE** `live+1%`, side **BUY** (add margin),
    amount `$300`. (The app shows the live price; if it doesn't fire in ~30 s, re-arm
    closer — a condition needs a fresh crossing past the trigger.)
-2. Watch it fire once: chip flips **armed → fired · closed**, one proposal appears,
-   and no further sweeps ever re-propose it.
+2. Watch it fire once: the condition disappears from the list the moment it
+   fires (it is closed and removed — one proposal appears in Pending Proposals,
+   and no further sweeps ever re-propose it). A fresh condition is a fresh shot.
 3. Show **TP/SL**: in the position row arm a take-profit and a stop-loss.
-4. **Narration:** "A condition fires exactly once, then closes itself — armed, fired,
-   done. No loops, no surprise repeat orders. Take-profits and stop-losses are
-   pre-authorized exits: when crossed, they close right away, exactly like an
-   exchange-side stop."
+4. **Narration:** "A condition fires exactly once, then closes and removes itself —
+   armed, fired, gone. No loops, no surprise repeat orders, nothing left hanging.
+   Take-profits and stop-losses are pre-authorized exits: when crossed, they close
+   right away, exactly like an exchange-side stop."
 
 ## Beat 5 — Auto mode with the consent notice (80–105 s)
 

@@ -729,9 +729,10 @@ def test_condition_buy_without_position_is_blocked(stack):
     run(orch.check_conditions())
     assert not [p for p in orch.proposals.values() if p.status.value == "PENDING"]
     assert any(a.event == "condition_blocked" for a in orch.audit)
-    # one-shot: even a blocked fire disarms the condition so it never retries
-    cond = next(iter(orch.conditions.values()))
-    assert cond.active is False and cond.fires == 1
+    assert any(a.event == "condition_fired" for a in orch.audit)
+    # one-shot + auto-close: even a blocked fire consumes the condition — it
+    # is closed and removed so it can never retry or linger on the page
+    assert not orch.conditions
 
 
 def _arm_below(stack, price=800.0, amount=400.0):
@@ -743,11 +744,11 @@ def _arm_below(stack, price=800.0, amount=400.0):
     return orch, market, sim
 
 
-def test_condition_fires_once_then_disarms_forever(stack):
-    """One-shot rule: a condition fires once when the price crosses the
-    trigger, then disarms itself. It never re-fires — not while the price
-    stays past the trigger, and not after the price returns and crosses again
-    (no automatic re-arm loop)."""
+def test_condition_fires_once_then_is_closed_and_removed(stack):
+    """One-shot + auto-close: a condition fires once when the price crosses
+    the trigger, queues its single proposal, and is then closed and removed —
+    it never lingers on the page, never re-fires while price stays past the
+    trigger, and never re-arms after price returns and crosses again."""
     orch, market, sim = stack
     _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)  # spare wallet
     orch, market, sim = _arm_below(stack)                  # BELOW 800, price 1000
@@ -755,9 +756,9 @@ def test_condition_fires_once_then_disarms_forever(stack):
     run(orch.check_conditions())
     assert sum(1 for p in orch.proposals.values()
                if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
-    cond = next(iter(orch.conditions.values()))
-    assert cond.fires == 1
-    assert cond.active is False, "condition must disarm after its single fire"
+    assert not orch.conditions, "condition is closed and removed after its single fire"
+    assert any(a.event == "condition_closed" for a in orch.audit)
+    assert any(a.event == "condition_fired" for a in orch.audit)
     # market stays below: five more sweeps, zero new proposals
     for _ in range(5):
         run(orch.check_conditions())
@@ -770,7 +771,22 @@ def test_condition_fires_once_then_disarms_forever(stack):
     run(orch.check_conditions())
     assert sum(1 for p in orch.proposals.values()
                if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
-    assert next(iter(orch.conditions.values())).fires == 1
+    assert not orch.conditions
+
+
+def test_fired_condition_gone_from_snapshot(stack):
+    """The page renders S.conditions straight from the snapshot — once a
+    condition fires it must be absent there too, so a page refresh can never
+    resurrect a spent condition."""
+    orch, market, sim = stack
+    _open_long(orch, margin=500.0, leverage=10.0, extra_fund=500.0)
+    orch, market, sim = _arm_below(stack, price=800.0, amount=400.0)
+    assert len(orch.snapshot()["conditions"]) == 1
+    market.prices["BTCUSDT"] = 700.0
+    run(orch.check_conditions())
+    snap = orch.snapshot()
+    assert snap["conditions"] == [], "spent condition must be absent from the snapshot"
+    assert not orch.conditions
 
 
 def test_condition_armed_while_price_already_past_waits_for_fresh_crossing(stack):
@@ -793,7 +809,7 @@ def test_condition_armed_while_price_already_past_waits_for_fresh_crossing(stack
     run(orch.check_conditions())
     assert sum(1 for p in orch.proposals.values()
                if p.status.value == "PENDING" and p.kind.value == "TRANSFER") == 1
-    assert next(iter(orch.conditions.values())).fires == 1
+    assert not orch.conditions, "fired condition is removed after its one shot"
 
 def test_condition_defers_when_plan_pending_same_symbol(stack):
     """#1: a fired condition must not stack a second action on a symbol that
@@ -808,10 +824,10 @@ def test_condition_defers_when_plan_pending_same_symbol(stack):
     orch, market, sim = _arm_below(stack, price=900.0, amount=300.0)
     market.prices["BTCUSDT"] = 850.0                     # fresh crossing below
     run(orch.check_conditions())
-    cond = next(iter(orch.conditions.values()))
-    assert cond.active is False and cond.fires == 1, "one-shot still spent once"
+    assert not orch.conditions, "the fired condition is closed and removed even when it defers"
     pend_after = [p for p in orch.proposals.values() if p.status.value == "PENDING"]
     assert len(pend_after) == len(pend_before), "must not stack a second plan"
+    assert any(a.event == "condition_fired" for a in orch.audit)
     assert any(a.event == "condition_deferred" for a in orch.audit)
 
 
@@ -852,8 +868,7 @@ def test_condition_auto_mode_does_not_drain_funds_on_stale_trigger(stack):
     acct = orch.account()
     pos = next(p for p in acct.futures_positions if p.symbol == "BTCUSDT")
     assert pos.margin_usdt == pytest.approx(900.0)
-    cond = next(iter(orch.conditions.values()))
-    assert cond.fires == 1 and cond.active is False
+    assert not orch.conditions, "auto-fired condition is closed and removed after executing once"
     # the second +400 was never spent: 900 spare was deposited, 400 used
     assert acct.futures_wallet_usdt == pytest.approx(500.0)
     assert acct.cash_usdt == pytest.approx(8600.0)         # 1400 moved to futures

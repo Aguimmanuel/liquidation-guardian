@@ -633,12 +633,12 @@ class Orchestrator:
     async def check_conditions(self) -> list[AgentResponse]:
         """Evaluate armed conditions against live prices (called periodically).
 
-        One-shot: a condition fires at most *once* when its trigger first
-        crosses, then disarms itself (active=False) so it can never loop.
-        Staying past the trigger never re-proposes — that would otherwise spam
-        the approval queue (and drain the futures wallet in auto mode) on every
-        2s poll while a coin simply trades beyond the price. Create a fresh
-        condition for another shot.
+        One-shot + auto-close: a condition fires at most *once* when its
+        trigger first crosses, then is closed and removed entirely — it
+        disappears from state and the page and can never re-arm or re-propose.
+        Staying past the trigger never re-proposes (no approval-queue spam or
+        auto-mode cash drain on the 2s poll); the audit trail keeps the fired
+        record. Arm a fresh condition for another shot.
         """
         if not self.conditions:
             return []
@@ -672,7 +672,13 @@ class Orchestrator:
                 continue
             cond.fires += 1
             cond.last_fired_at = utcnow()
-            cond.active = False  # one-shot: executes once, then disarms
+            cond.active = False
+            # One-shot + auto-close: the single firing consumes the condition
+            # entirely. Drop it from state right away (before proposing) so it
+            # can never reappear on the page, re-arm, or re-propose — even if
+            # the sweep's proposal step raises. The audit trail below keeps
+            # the fired record.
+            self.conditions.pop(cond.id, None)
             self.log(
                 AuditLevel.ACTION,
                 "condition_fired",
@@ -681,7 +687,7 @@ class Orchestrator:
             self.log(
                 AuditLevel.INFO,
                 "condition_closed",
-                f"{cond.symbol} {cond.op.value} {cond.price} — disarmed after firing once",
+                f"{cond.symbol} {cond.op.value} {cond.price} — closed and removed after firing once",
             )
             resp = await self._propose_condition_trade(cond, price)
             if resp:
